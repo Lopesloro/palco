@@ -11,6 +11,7 @@ describe('parseArgs', () => {
     expect(parseArgs(['recruit', 'A', '--preset', 'Codex', '--role=Rev'])).toEqual({ pos: ['recruit', 'A'], flags: { preset: 'Codex', role: 'Rev' } });
     expect(parseArgs(['floor', 'delete', 'X', '--force'])).toEqual({ pos: ['floor', 'delete', 'X'], flags: { force: true } });
     expect(parseArgs(['a', '--', '--not-a-flag'])).toEqual({ pos: ['a', '--not-a-flag'], flags: {} });
+    expect(parseArgs(['note', 'create', 'x', '--stack', 'Sprint'])).toEqual({ pos: ['note', 'create', 'x'], flags: { stack: 'Sprint' } });
   });
 });
 

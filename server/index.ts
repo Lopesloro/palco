@@ -357,8 +357,10 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
     }
 
     // static web app
-    let file = path.join(WEB_DIR, decodeURIComponent(u.pathname));
-    if (!file.startsWith(WEB_DIR)) return send(403, 'forbidden', 'text/plain');
+    let rel: string;
+    try { rel = decodeURIComponent(u.pathname); } catch { return send(400, 'bad request', 'text/plain'); }
+    let file = path.join(WEB_DIR, rel);
+    if (file !== WEB_DIR && !file.startsWith(WEB_DIR + path.sep)) return send(403, 'forbidden', 'text/plain');
     if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(WEB_DIR, 'index.html');
     if (!fs.existsSync(file)) return send(503, 'Interface não compilada. Rode: npm run build', 'text/plain; charset=utf-8');
     res.writeHead(200, {
@@ -401,6 +403,9 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]).replace(/\.ts$/, '.js').endsWith(path.join('server', 'index.js'));
 if (isMain) {
+  // One bad request must never take down every agent session with it.
+  process.on('unhandledRejection', (err) => console.error('[palco] unhandled rejection:', err));
+  process.on('uncaughtException', (err) => console.error('[palco] uncaught exception:', err));
   startServer().then((srv) => {
     console.log(`[palco] ${VERSION} ouvindo em ${srv.url} (dados em ${PALCO_HOME})`);
     let closing = false;

@@ -84,6 +84,11 @@ describe('security', () => {
     expect(await rawRequest({ Host: `127.0.0.1:${srv.port}`, Origin: `http://localhost:${srv.port}` })).toBe(200);
   });
 
+  it('survives a malformed URL escape instead of crashing', async () => {
+    expect(await rawRequest({ Host: `127.0.0.1:${srv.port}` }, '/%E0%A4%A')).toBe(400);
+    expect((await fetch(`${srv.url}/api/health`)).status).toBe(200);
+  });
+
   it('keeps the config private', () => {
     const mode = fs.statSync(path.join(HOME, 'config.json')).mode & 0o777;
     expect(mode).toBe(0o600);
@@ -150,7 +155,8 @@ describe('agents', () => {
   });
 
   it('notes: create, read with lines, edit, lock', async () => {
-    const c = await cli(alpha, 'note', 'create', '# Plano\nlinha dois', '--name', 'Plano');
+    const c = await cli(alpha, 'note', 'create', '# Plano\nlinha dois', '--name', 'Plano', '--stack', 'Sprint');
+    expect((await cli(alpha, 'list')).out).toContain('fichário: Sprint');
     expect(c.out).toContain('"Plano"');
     const read = await cli(alpha, 'note', 'read', 'Plano');
     expect(read.out).toMatch(/1\s+# Plano/);
@@ -250,6 +256,24 @@ describe('floors', () => {
     expect(g('branch', '--list', 'palco/experimento').trim()).toBe('');
     expect(fs.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('.palco/');
     fs.rmSync(repo, { recursive: true, force: true });
+  });
+});
+
+describe('floors without git', () => {
+  it('copies the project without recursing into its own floors folder', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'palco-plain-'));
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'um');
+    const ws = await op('ws.create', { name: 'Plain', dir });
+    const first = await op<{ floor: { dir: string } }>('floor.create', { wsId: ws.id, name: 'Um', opts: { noGit: true } });
+    const second = await op<{ floor: { dir: string } }>('floor.create', { wsId: ws.id, name: 'Dois', opts: { noGit: true } });
+    expect(fs.readFileSync(path.join(first.floor.dir, 'a.txt'), 'utf8')).toBe('um');
+    expect(fs.existsSync(path.join(second.floor.dir, '.palco'))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('refuses to clone the home directory', async () => {
+    const ws = await op('ws.create', { name: 'Casa', dir: os.homedir() });
+    await expect(op('floor.create', { wsId: ws.id, name: 'X', opts: { noGit: true } })).rejects.toThrow(/pasta pessoal/);
   });
 });
 

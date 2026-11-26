@@ -29,6 +29,14 @@ mkdir -p "$APP"
 rsync -a --delete --exclude .git --exclude .palco --exclude test "$SRC/" "$APP/"
 chmod +x "$APP"/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true
 
+if curl -fsS --max-time 2 "http://127.0.0.1:${PALCO_PORT:-4747}/api/health" >/dev/null 2>&1; then
+  printf '\033[1;33m!\033[0m O Palco está rodando: atualizar reinicia o serviço e encerra os terminais abertos (o histórico fica salvo).\n'
+  if [ -t 0 ]; then
+    read -r -p "Continuar? [s/N] " ok
+    case "$ok" in s|S|sim|y|Y) ;; *) die "Atualização cancelada. Os arquivos novos já estão em $APP; rode de novo quando quiser reiniciar." ;; esac
+  fi
+fi
+
 say "Registrando o serviço"
 node "$APP/dist/cli/palco.js" install
 

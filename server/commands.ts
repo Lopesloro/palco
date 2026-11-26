@@ -13,7 +13,7 @@ import type {
 const BOOL = new Set([
   'raw', 'without-me', 'copy', 'copy-ground', 'no-git', 'existing-branch', 'keep-branch', 'keep-folder', 'force',
   'delete-branch', 'keep-floor', 'clear', 'none', 'full', 'no-skip-if-busy', 'skip-if-busy', 'help', 'json', 'root',
-  'disable', 'locked', 'unlocked', 'stack',
+  'disable', 'locked', 'unlocked',
 ]);
 
 export interface Parsed {
@@ -266,6 +266,7 @@ export class Commands {
       case 'delete': {
         if (p.flags.stack) {
           const stackName = str(p.flags.stack) ?? args[0];
+          if (!stackName) throw new PalcoError('Uso: palco note delete --stack "Fichário"');
           const { ws, node: me } = this.caller(ctx);
           const notes = this.core.reach(me.id).notes.filter((x) => x.node.data.stack === stackName);
           if (!notes.length) throw new PalcoError(`Fichário "${stackName}" não encontrado entre suas notas.`);

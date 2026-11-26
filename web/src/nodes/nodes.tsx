@@ -213,7 +213,10 @@ export const PortalNode = memo(({ data, selected }: NodeProps) => {
         onWheel={(e) => img.current && input({ kind: 'wheel', ...pt(e), dx: e.deltaX, dy: e.deltaY })}
         onContextMenu={(e) => e.preventDefault()}
         onPaste={(e) => { e.preventDefault(); input({ kind: 'text', text: e.clipboardData.getData('text') }); }}
+        onKeyUp={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
+          // keys belong to the page: never let React Flow see Backspace/Delete and remove this card
+          e.stopPropagation();
           if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') return; // let paste event fire
           e.preventDefault();
           const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && e.key.length > 1 && 'Shift', e.metaKey && 'Meta'].filter(Boolean);

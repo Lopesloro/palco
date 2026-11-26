@@ -135,7 +135,9 @@ async function ensureRunning() {
   const h = await health();
   if (h) return h;
   if (installed()) {
-    launchctl('kickstart', '-k', `gui/${uidNum()}/${LABEL}`);
+    // `palco stop` boots the job out of launchd, so load it again before kicking it
+    launchctl('bootstrap', `gui/${uidNum()}`, PLIST);
+    launchctl('kickstart', `gui/${uidNum()}/${LABEL}`);
   } else {
     if (!fs.existsSync(SERVER_JS)) throw new Error(`Build ausente em ${SERVER_JS}. Rode npm run build.`);
     fs.mkdirSync(path.dirname(LOG), { recursive: true });
@@ -196,7 +198,10 @@ async function readStdin(): Promise<string | undefined> {
   const timer = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 400));
   const reading = (async () => { for await (const c of process.stdin) chunks.push(c as Buffer); return 'done' as const; })();
   const first = await Promise.race([reading, timer]);
-  if (first === 'timeout' && chunks.length === 0) return undefined;
+  if (first === 'timeout' && chunks.length === 0) {
+    process.stdin.destroy(); // an inherited pipe that never closes must not keep us alive
+    return undefined;
+  }
   if (first === 'timeout') await reading;
   const s = Buffer.concat(chunks).toString('utf8');
   return s.length ? s.replace(/\n$/, '') : undefined;
@@ -263,7 +268,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+const KEEP_ALIVE = new Set(['logs']);
+main().then(() => {
+  // exit only after stdout drains: a big `portal html` piped elsewhere must not be cut short
+  if (!KEEP_ALIVE.has(process.argv[2] ?? '')) process.stdout.write('', () => process.exit(process.exitCode ?? 0));
+}).catch((e) => {
   console.error((e as Error).message);
   process.exit(1);
 });

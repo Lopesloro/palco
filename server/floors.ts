@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -85,12 +86,18 @@ export class Floors {
         if (opts.copy) await this.cloneUntracked(src, target);
         note = `Worktree git em ${target} no branch ${branch}${opts.copy ? ' (arquivos não rastreados clonados por copy-on-write)' : ''}.`;
       } else {
-        fs.mkdirSync(floorsRoot, { recursive: true });
-        // APFS copy-on-write clone: instant and costs no extra disk until files change.
-        await exec('cp', ['-cR', src.endsWith('/') ? src : `${src}/`, target]).catch(async () => {
-          await exec('cp', ['-R', `${src}/`, target]);
-        });
-        fs.rmSync(path.join(target, '.palco'), { recursive: true, force: true });
+        const resolved = path.resolve(src);
+        if (resolved === os.homedir() || resolved === path.parse(resolved).root) {
+          throw new PalcoError('Não copio a pasta pessoal nem a raiz do disco. Aponte o workspace para a pasta do projeto antes de criar o andar.');
+        }
+        fs.mkdirSync(target, { recursive: true });
+        // Copy entry by entry so the floors folder (which lives inside src) is never copied into itself.
+        // cp -c makes APFS copy-on-write clones: instant, no extra disk until files change.
+        for (const entry of fs.readdirSync(src)) {
+          if (entry === '.palco') continue;
+          const from = path.join(src, entry);
+          await exec('cp', ['-cR', from, target]).catch(() => exec('cp', ['-R', from, target]));
+        }
         note = `Cópia isolada (copy-on-write) em ${target}.`;
       }
       floor.dir = target;
@@ -157,7 +164,9 @@ export class Floors {
     if (groundDirty) throw new PalcoError('O térreo tem mudanças não commitadas; o merge não vai sobrescrever trabalho seu.');
     const into = opts.into || floor.baseBranch || (await git(ground.dir, 'rev-parse', '--abbrev-ref', 'HEAD'));
     const current = await git(ground.dir, 'rev-parse', '--abbrev-ref', 'HEAD');
-    if (current !== into) await git(ground.dir, 'checkout', into);
+    if (current !== into) {
+      throw new PalcoError(`O térreo está no branch ${current}, não em ${into}. Mude o térreo para ${into} (ou use --into ${current}); o Palco não troca o branch da sua cópia principal.`);
+    }
     try {
       await git(ground.dir, 'merge', '--no-ff', '-m', `Land floor ${floor.name} (${floor.branch})`, floor.branch);
     } catch (err) {

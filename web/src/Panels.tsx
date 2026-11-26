@@ -5,6 +5,7 @@ import { dialog } from './ui';
 import type { Preset, Role, Routine, Workspace } from './types';
 
 const err = (e: unknown) => toast((e as Error).message);
+const EMPTY: never[] = [];
 
 export function Panel({ ws, floorId }: { ws: Workspace; floorId: string }) {
   const panel = useStore((s) => s.panel);
@@ -96,7 +97,7 @@ function Routines({ ws }: { ws: Workspace }) {
 }
 
 function Roles({ ws }: { ws: Workspace }) {
-  const global = useStore((s) => s.config?.roles ?? []);
+  const global = useStore((s) => s.config?.roles ?? EMPTY);
   const edit = async (r?: Role) => {
     const v = await dialog(r ? `Editar role ${r.name}` : 'Nova role', [
       { key: 'name', label: 'Nome', value: r?.name ?? '' },
@@ -128,7 +129,7 @@ function Roles({ ws }: { ws: Workspace }) {
 }
 
 function Presets() {
-  const presets = useStore((s) => s.config?.presets ?? []);
+  const presets = useStore((s) => s.config?.presets ?? EMPTY);
   const edit = async (p?: Preset) => {
     const v = await dialog(p ? `Editar ${p.name}` : 'Novo preset', [
       { key: 'name', label: 'Nome', value: p?.name ?? '' },
@@ -162,7 +163,7 @@ function Presets() {
 }
 
 function Partituras({ ws, floorId }: { ws: Workspace; floorId: string }) {
-  const parts = useStore((s) => s.config?.partituras ?? []);
+  const parts = useStore((s) => s.config?.partituras ?? EMPTY);
   return (
     <>
       <p className="muted">Equipes salvas (agentes, roles, notas e cordas). Um agente salva a própria equipe com <code>palco partitura create "Nome"</code>.</p>
