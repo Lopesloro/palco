@@ -87,6 +87,21 @@ function linkBin() {
   return onPath ? target : `${target}  (adicione ~/.local/bin ao PATH: echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc)`;
 }
 
+/** Lets Claude Code (and Codex, when present) discover the `palco` commands. */
+function installSkills() {
+  const src = path.join(PKG, 'skills', 'palco', 'SKILL.md');
+  if (!fs.existsSync(src)) return [];
+  const done: string[] = [];
+  for (const root of [path.join(os.homedir(), '.claude'), path.join(os.homedir(), '.codex')]) {
+    if (!fs.existsSync(root)) continue;
+    const dir = path.join(root, 'skills', 'palco');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(src, path.join(dir, 'SKILL.md'));
+    done.push(dir);
+  }
+  return done;
+}
+
 async function install() {
   if (process.platform !== 'darwin') throw new Error('O serviço automático usa launchd (macOS). Em outro sistema, rode `palco start`.');
   if (!fs.existsSync(SERVER_JS)) throw new Error(`Build ausente em ${SERVER_JS}. Rode npm run build.`);
@@ -104,6 +119,8 @@ async function install() {
   const ok = await waitHealthy(20000);
   console.log(`Serviço launchd instalado (${LABEL}): sobe no login e reinicia se cair.`);
   console.log(`Comando: ${linkBin()}`);
+  const skills = installSkills();
+  if (skills.length) console.log(`Skill dos agentes: ${skills.join(', ')}`);
   if (!ok) throw new Error(`O serviço não respondeu. Veja: palco logs`);
   console.log(`Palco ${ok.version} no ar em ${base()}`);
 }

@@ -204,6 +204,28 @@ describe('agents', () => {
   });
 });
 
+describe('portals', () => {
+  it('drives a headless browser page by @refs', async () => {
+    const { findChrome } = await import('../server/portals.js');
+    if (!findChrome()) return; // no browser on this machine: nothing to drive
+    const ws = srv.store.workspaces.get(wsId)!;
+    const me = ws.nodes.find((n) => (n.data as { name: string }).name === 'Alpha')!;
+    const html = '<title>Teste</title><input placeholder="nome"><button onclick="document.title=document.querySelector(\'input\').value">Salvar</button>';
+    const made = await cli(me.id, 'portal', 'create', 'Navegador', `data:text/html,${encodeURIComponent(html)}`);
+    expect(made.code).toBe(0);
+    const snap = (await cli(me.id, 'portal', 'snapshot', 'Navegador')).out;
+    const input = snap.match(/textbox "nome".*@(e\d+)/)?.[1];
+    const button = snap.match(/button "Salvar".*@(e\d+)/)?.[1];
+    expect(input && button).toBeTruthy();
+    expect((await cli(me.id, 'portal', 'fill', 'Navegador', `@${input}`, 'Palco')).code).toBe(0);
+    expect((await cli(me.id, 'portal', 'click', 'Navegador', `@${button}`)).code).toBe(0);
+    expect((await cli(me.id, 'portal', 'info', 'Navegador')).out).toContain('título: Palco');
+    const shot = (await cli(me.id, 'portal', 'screenshot', 'Navegador')).out.trim();
+    expect(fs.existsSync(shot)).toBe(true);
+    expect((await cli(me.id, 'portal', 'click', 'Navegador', 'nada')).out).toMatch(/Referência inválida/);
+  }, 60000);
+});
+
 describe('floors', () => {
   it('creates a git worktree floor, lands it and cleans up', async () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'palco-repo-'));
