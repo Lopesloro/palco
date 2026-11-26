@@ -58,7 +58,7 @@ export function importMaestri(core: Core, root = path.join(os.homedir(), '.maest
       const a = idMap.get(String(c.terminalIdA ?? c.terminalId ?? c.noteIdA ?? c.fromId ?? ''));
       const b = idMap.get(String(c.terminalIdB ?? c.noteId ?? c.noteIdB ?? c.toId ?? ''));
       if (a && b) {
-        try { core.connect(ws, a, b); } catch { /* incompatible pair */ }
+        try { core.connect(ws, a, b, { quiet: true }); } catch { /* incompatible pair */ }
       }
     }
     imported++;

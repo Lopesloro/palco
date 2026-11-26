@@ -5,6 +5,10 @@ import type { Floors } from './floors.js';
 import type { Routines } from './routines.js';
 import { describeSchedule } from './routines.js';
 import type { Portals } from './portals.js';
+import type { Computer } from './computer.js';
+import type { Devices } from './devices.js';
+import { DEVICE_HELP } from './devices.js';
+import type { Ombro } from './ombro.js';
 import { uid, now, randomColor } from './store.js';
 import type {
   BandData, NoteData, PalcoNode, Partitura, PortalData, Preset, Role, Routine, TerminalData, Workspace,
@@ -13,7 +17,7 @@ import type {
 const BOOL = new Set([
   'raw', 'without-me', 'copy', 'copy-ground', 'no-git', 'existing-branch', 'keep-branch', 'keep-folder', 'force',
   'delete-branch', 'keep-floor', 'clear', 'none', 'full', 'no-skip-if-busy', 'skip-if-busy', 'help', 'json', 'root',
-  'disable', 'locked', 'unlocked',
+  'disable', 'locked', 'unlocked', 'right', 'double',
 ]);
 
 export interface Parsed {
@@ -85,6 +89,11 @@ Portais (navegador)
                                        select upload key selectall scroll scrollintoview text html evaluate screenshot
                                        resize ua logs logs-start clear
 
+Computer use, dispositivos e Ombro
+  palco computer help                         operar outros apps do Mac (o usuário autoriza antes)
+  palco device help                           Android (adb) e Simulador iOS no canvas
+  palco ombro [N] | palco ombro now "Agente"  resumos locais (Apple Intelligence) de tarefas terminadas
+
 Serviço
   palco            abre o Palco no navegador (sobe o serviço se preciso)
   palco status | start | stop | restart | logs | install | uninstall | doctor | debug
@@ -96,7 +105,7 @@ export interface Ctx {
 }
 
 export class Commands {
-  constructor(private core: Core, private floors: Floors, private routines: Routines, private portals: Portals) {}
+  constructor(private core: Core, private floors: Floors, private routines: Routines, private portals: Portals, private computer: Computer, private devices: Devices, private ombro: Ombro) {}
 
   private caller(ctx: Ctx) {
     if (!ctx.callerId) throw new PalcoError('Este comando só funciona dentro de um terminal do Palco (PALCO_TERMINAL_ID ausente).');
@@ -134,6 +143,9 @@ export class Commands {
       case 'workspace': return this.workspace(p, ctx);
       case 'routine': return this.routine(p, ctx);
       case 'portal': return this.portal(p, ctx);
+      case 'computer': return this.computer.run(p, ctx.callerId);
+      case 'device': return this.device(p, ctx);
+      case 'ombro': return this.ombroCmd(p, ctx);
       case 'debug': return this.debug(ctx);
       default: throw new PalcoError(`Comando desconhecido: ${cmd}\n\n${HELP}`);
     }
@@ -171,7 +183,7 @@ export class Commands {
     }
     lines.push('', 'Portais:');
     if (!r.portals.length) lines.push('  (nenhum)');
-    for (const pt of r.portals) lines.push(`  - ${nameOf(pt)} → ${pt.data.url || 'about:blank'}`);
+    for (const pt of r.portals) lines.push(pt.type === 'device' ? `  - ${nameOf(pt)} (dispositivo ${(pt.data as unknown as { platform: string }).platform}: palco device)` : `  - ${nameOf(pt)} → ${pt.data.url || 'about:blank'}`);
     return lines.join('\n');
   }
 
@@ -217,6 +229,7 @@ export class Commands {
     if (att) attachments.push(path.resolve(att));
     if (!text.trim() && !attachments.length) throw new PalcoError('Nada para dizer. Use: palco say "texto"');
     this.core.store.appendChat(ws.id, node.id, { from: 'agent', name: nameOf(node), text, attachments });
+    this.core.log({ kind: 'say', from: nameOf(node), fromId: node.id, to: 'Você', text });
     return 'Resposta entregue no chat.';
   }
 
@@ -232,7 +245,8 @@ export class Commands {
         const name = str(p.flags.name) || firstLine(content) || 'Nota';
         const n = this.core.addNode<NoteData>(ws, 'note', { name, color: str(p.flags.color) || 'yellow', locked: false, preview: true, stack: str(p.flags.stack) }, { near: node, side: 'left' });
         store.writeNote(ws.id, n.id, content);
-        this.core.connect(ws, node.id, n.id);
+        this.core.connect(ws, node.id, n.id, { quiet: true });
+        this.logNote(ctx, n, `criou a nota: ${content}`);
         return `Nota criada: "${n.data.name}"`;
       }
       case 'read': {
@@ -246,7 +260,9 @@ export class Commands {
         const { ws, node } = resolveNote(args[0]);
         if (node.data.locked) throw new PalcoError(`"${nameOf(node)}" está trancada (locked). Peça ao usuário para destrancar.`);
         if (sub === 'write') {
-          store.writeNote(ws.id, node.id, args.slice(1).join(' ') || ctx.stdin || '');
+          const body = args.slice(1).join(' ') || ctx.stdin || '';
+          store.writeNote(ws.id, node.id, body);
+          this.logNote(ctx, node, `reescreveu a nota: ${body}`);
           return `"${nameOf(node)}" reescrita.`;
         }
         const cur = store.readNote(ws.id, node.id);
@@ -256,6 +272,7 @@ export class Commands {
         if (count === 0) throw new PalcoError('Texto velho não encontrado na nota. Rode `palco note read` e copie exatamente.');
         if (count > 1) throw new PalcoError(`O texto aparece ${count} vezes; inclua mais contexto para ficar único.`);
         store.writeNote(ws.id, node.id, cur.replace(oldT, newT));
+        this.logNote(ctx, node, `editou: ${newT}`);
         return `"${nameOf(node)}" editada.`;
       }
       case 'stack': case 'unstack': {
@@ -279,6 +296,11 @@ export class Commands {
       }
       default: throw new PalcoError('Uso: palco note create|read|write|edit|stack|unstack|delete');
     }
+  }
+
+  private logNote(ctx: Ctx, note: PalcoNode, text: string) {
+    const me = ctx.callerId ? this.core.nodeById(ctx.callerId) : undefined;
+    this.core.log({ kind: 'note', from: me ? nameOf(me) : 'Você', fromId: me?.id, to: nameOf(note), toId: note.id, text });
   }
 
   // ------------------------------------------------------------------ team
@@ -387,10 +409,11 @@ export class Commands {
       this.core.store.touch(ws);
       how = ` na sua band ${nameOf(myBand)}`;
     } else if (me) {
-      this.core.connect(me.ws, me.node.id, node.id);
+      this.core.connect(me.ws, me.node.id, node.id, { quiet: true });
       how = ', conectado a você';
     }
     const addr = me ? this.core.displayName(node, me.ws) : nameOf(node);
+    this.core.log({ kind: 'recruit', from: me ? nameOf(me.node) : 'Você', fromId: me?.node.id, to: nameOf(node), toId: node.id, text: `recrutou ${nameOf(node)} (${data.command || 'shell'}${role ? `, role ${role.name}` : ''})` });
     return `Recrutado "${addr}"${how} (${data.command || 'shell'}${role ? `, role ${role.name}` : ''}, andar ${floor.name}). Dê alguns segundos para o agente iniciar antes do primeiro ask.`;
   }
 
@@ -580,11 +603,11 @@ export class Commands {
             (b.data as BandData).members = ((it.data as BandData).members ?? []).map((m) => map.get(m)).filter(Boolean) as string[];
           }
         }
-        for (const [a, b] of part.edges) if (map.get(a) && map.get(b)) this.core.connect(ws, map.get(a)!, map.get(b)!);
+        for (const [a, b] of part.edges) if (map.get(a) && map.get(b)) this.core.connect(ws, map.get(a)!, map.get(b)!, { quiet: true });
         const agents = created.filter((n) => n.type === 'terminal') as PalcoNode<TerminalData>[];
         if (me) {
           const maestros = agents.filter((a) => a.data.maestro);
-          for (const a of maestros.length ? maestros : agents) this.core.connect(ws, me.node.id, a.id);
+          for (const a of maestros.length ? maestros : agents) this.core.connect(ws, me.node.id, a.id, { quiet: true });
         }
         this.core.store.touch(ws);
         return `Partitura "${part.name}" colocada. Agentes: ${agents.map((a) => nameOf(a)).join(', ') || '(nenhum)'}`;
@@ -660,7 +683,7 @@ export class Commands {
             map.set(n.id, c.id);
             if (n.type === 'note') store.writeNote(ws.id, c.id, store.readNote(src.id, n.id));
           }
-          for (const e of src.edges) if (map.has(e.a) && map.has(e.b)) this.core.connect(ws, map.get(e.a)!, map.get(e.b)!);
+          for (const e of src.edges) if (map.has(e.a) && map.has(e.b)) this.core.connect(ws, map.get(e.a)!, map.get(e.b)!, { quiet: true });
         }
         void ctx;
         return `Workspace "${ws.name}" criado em ${abs}.`;
@@ -742,6 +765,33 @@ export class Commands {
     const extra = [...args];
     if (p.flags.full) extra.push('--full');
     return this.portals.command(node.id, sub, extra);
+  }
+
+  async device(p: Parsed, ctx: Ctx) {
+    const [sub, name, ...args] = p.pos;
+    if (!sub || sub === 'help' || p.flags.help) return DEVICE_HELP;
+    if (sub === 'status') return this.devices.status();
+    if (sub === 'create') {
+      const me = this.caller(ctx);
+      const platform = args[0] === 'ios' ? 'ios' : args[0] === 'android' ? 'android' : undefined;
+      if (!name || !platform) throw new PalcoError('Uso: palco device create "Nome" android|ios [--id SERIAL]');
+      const node = this.core.addNode(me.ws, 'device', { name, platform, deviceId: str(p.flags.id) }, { near: me.node });
+      this.core.connect(me.ws, me.node.id, node.id);
+      return `Dispositivo "${(node.data as { name: string }).name}" (${platform}) criado e conectado a você.`;
+    }
+    const { node } = this.core.reachable(ctx.callerId, name ?? '', ['device']);
+    return this.devices.command(node.id, sub, args, ctx.callerId);
+  }
+
+  async ombroCmd(p: Parsed, ctx: Ctx) {
+    const [sub, name] = p.pos;
+    if (sub === 'now' || sub === 'resumir') {
+      const { node } = this.core.reachable(ctx.callerId, name ?? '', ['terminal']);
+      const e = await this.ombro.summarize(node.id);
+      return e ? e.text : 'Esse terminal não está rodando.';
+    }
+    const list = this.ombro.entries.slice(0, Number(sub) || 8);
+    return list.map((e) => `[${new Date(e.ts).toLocaleTimeString()}] ${e.name}\n${e.text}`).join('\n\n') || '(Ombro ainda não resumiu nada)';
   }
 
   debug(ctx: Ctx) {

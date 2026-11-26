@@ -1,10 +1,11 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
 import { op, token } from './api';
 import { currentFloorId, currentWorkspace, getState, setState, toast, useStore, type State } from './store';
 import { Canvas } from './Canvas';
 import { Composer } from './Composer';
 import { Panel } from './Panels';
+import { ComputerBar, SidePanel } from './SidePanel';
 import { DialogHost, Icon, StatusDot, STATUS_LABEL, dialog } from './ui';
 import type { Floor, PalcoNode, TerminalData, Workspace } from './types';
 
@@ -43,7 +44,6 @@ function Sidebar({ ws, floorId }: { ws?: Workspace; floorId?: string }) {
   const version = useStore((s) => s.version);
   const panel = useStore((s) => s.panel);
   const agents = useMemo(() => (ws?.nodes.filter((n) => n.type === 'terminal') ?? []) as PalcoNode<TerminalData>[], [ws]);
-  const needs = (id: string) => statuses[id] === 'idle';
   const toggle = (p: State['panel']) => setState({ panel: panel === p ? undefined : p });
   return (
     <nav className="sidebar">
@@ -73,7 +73,7 @@ function Sidebar({ ws, floorId }: { ws?: Workspace; floorId?: string }) {
                 <li key={a.id} onClick={() => setState({ focusNode: { id: a.id, at: Date.now() } })} className={a.floorId === floorId ? '' : 'other-floor'}>
                   <StatusDot status={statuses[a.id]} />
                   <span className="name">{a.data.maestro ? '★ ' : ''}{a.data.name}</span>
-                  <span className="muted small">{floor && !floor.ground ? `${floor.name} · ` : ''}{needs(a.id) ? 'esperando' : STATUS_LABEL[statuses[a.id] ?? 'exited']}</span>
+                  <span className={`small status-label st-${statuses[a.id] ?? 'exited'}`}>{floor && !floor.ground ? `${floor.name} · ` : ''}{STATUS_LABEL[statuses[a.id] ?? 'exited']}</span>
                 </li>
               );
             })}
@@ -133,53 +133,95 @@ async function floorMenu(ws: Workspace, f: Floor) {
   } catch (e) { err(e); }
 }
 
-function TopBar({ ws, floorId }: { ws: Workspace; floorId: string }) {
+function AddMenu({ ws, floorId }: { ws: Workspace; floorId: string }) {
   const presets = useStore((s) => s.config?.presets);
-  const tool = useStore((s) => s.tool);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [open]);
   const add = async (type: string, extra: Record<string, unknown> = {}) => {
+    setOpen(false);
     try {
       if (type === 'portal') {
-        const r = await dialog('Novo portal', [{ key: 'url', label: 'Endereço', placeholder: 'localhost:3000' }, { key: 'name', label: 'Nome', value: 'Portal' }]);
+        const r = await dialog('Novo portal (navegador)', [{ key: 'url', label: 'Endereço', placeholder: 'localhost:3000 ou https://…' }, { key: 'name', label: 'Nome', value: 'Navegador' }]);
         if (!r) return;
-        extra = { data: { name: r.name || 'Portal', url: r.url } };
+        extra = { data: { name: r.name || 'Navegador', url: r.url } };
+      }
+      if (type === 'device') {
+        const r = await dialog('Novo dispositivo', [
+          { key: 'platform', label: 'Tipo', type: 'select', value: 'android', options: [{ value: 'android', label: 'Android (adb: celular ou emulador)' }, { value: 'ios', label: 'Simulador iOS (precisa do Xcode)' }] },
+          { key: 'name', label: 'Nome', value: 'Aparelho' },
+          { key: 'id', label: 'Serial/UDID (opcional)', placeholder: 'vazio = o único conectado' },
+        ]);
+        if (!r) return;
+        extra = { data: { name: r.name || 'Aparelho', platform: r.platform, deviceId: r.id || undefined } };
       }
       const n = await op<PalcoNode>('node.add', { wsId: ws.id, type, floorId, ...extra });
       setState({ focusNode: { id: n.id, at: Date.now() } });
     } catch (e) { err(e); }
   };
+  const agents = (presets ?? []).filter((p) => p.quickStart);
+  return (
+    <div className="add-menu" onClick={(e) => e.stopPropagation()}>
+      <button className="primary" onClick={() => setOpen(!open)}>＋ Adicionar</button>
+      {open && (
+        <div className="menu">
+          <div className="menu-title">Agentes</div>
+          {agents.map((p) => (
+            <button key={p.id} onClick={() => void add('terminal', { presetId: p.id })}>
+              <span className="swatch" style={{ background: p.color }} /> {p.name} <span className="muted small">{p.command || 'shell'}</span>
+            </button>
+          ))}
+          <div className="menu-title">Contexto e ferramentas</div>
+          <button onClick={() => void add('note')}>📝 Nota <span className="muted small">texto compartilhado com agentes</span></button>
+          <button onClick={() => void add('portal')}>🌐 Portal <span className="muted small">navegador que você e os agentes usam</span></button>
+          <button onClick={() => void add('device')}>📱 Dispositivo <span className="muted small">Android ou Simulador iOS</span></button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TopBar({ ws, floorId }: { ws: Workspace; floorId: string }) {
+  const tool = useStore((s) => s.tool);
+  const side = useStore((s) => s.side);
+  const attentionCount = useStore((s) => ws.nodes.filter((n) => s.statuses[n.id] === 'attention').length);
+  const floor = ws.floors.find((f) => f.id === floorId);
   return (
     <div className="topbar">
+      <div className="ws-title">
+        <b>{ws.name}</b>
+        <span className="muted small" title={ws.dir}>{ws.dir.replace(/^\/Users\/[^/]+/, '~')}</span>
+      </div>
       <div className="floors">
         {ws.floors.map((f) => (
           <button key={f.id} className={`floor ${f.id === floorId ? 'on' : ''} ${f.unloaded ? 'unloaded' : ''}`}
             onClick={() => setState((s) => ({ currentFloor: { ...s.currentFloor, [ws.id]: f.id } }))}
             onDoubleClick={() => void floorMenu(ws, f)}
-            title={`${f.dir}${f.branch ? `\nbranch ${f.branch}` : ''}\nduplo clique: integrar, renomear, apagar`}>
-            {f.ground ? '⌂ Térreo' : f.name}
+            title={`${f.dir}${f.branch ? `\nbranch ${f.branch}` : ''}${f.ground ? '' : '\nduplo clique: integrar, renomear, apagar'}`}>
+            {f.ground ? 'Térreo' : f.name}
             {f.status && <span className={`fstate s-${f.status.state ?? 'working'}`} title={f.status.text}>{f.status.progress ?? f.status.state ?? '•'}</span>}
           </button>
         ))}
-        <button className="ghost" title="Novo andar" onClick={() => void newFloor(ws)}>＋ andar</button>
+        <button className="ghost" title="Novo andar: cópia isolada do projeto (git worktree)" onClick={() => void newFloor(ws)}>＋ andar</button>
       </div>
       <span className="spacer" />
-      <div className="quick">
-        {(presets ?? []).filter((p) => p.quickStart).map((p) => (
-          <button key={p.id} className="ghost" onClick={() => void add('terminal', { presetId: p.id })} title={p.command || 'shell'}>
-            <span className="swatch" style={{ background: p.color }} /> {p.name}
-          </button>
-        ))}
-        <button className="ghost" onClick={() => void add('note')}>📝 Nota</button>
-        <button className="ghost" onClick={() => void add('portal')}>🌐 Portal</button>
-      </div>
-      <div className="tools">
+      {attentionCount > 0 && <span className="attention-pill" title="Agentes parados esperando uma resposta sua">⚠ {attentionCount} precisa(m) de você</span>}
+      <div className="tools" title="Desenho">
         <Icon title="Selecionar (Esc)" active={tool === 'select'} onClick={() => setState({ tool: 'select' })}>➤</Icon>
         <Icon title="Caneta" active={tool === 'pen'} onClick={() => setState({ tool: 'pen' })}>✎</Icon>
         <Icon title="Seta" active={tool === 'arrow'} onClick={() => setState({ tool: 'arrow' })}>↗</Icon>
         <Icon title="Retângulo" active={tool === 'rect'} onClick={() => setState({ tool: 'rect' })}>▭</Icon>
       </div>
-      {ws.floors.find((f) => f.id === floorId)?.status?.text && (
-        <div className="floor-status muted small">{ws.floors.find((f) => f.id === floorId)!.status!.text}</div>
-      )}
+      <div className="seg">
+        <button className={side === 'activity' ? 'on' : ''} title="O que passa entre os agentes" onClick={() => setState({ side: side === 'activity' ? undefined : 'activity' })}>Atividade</button>
+        <button className={side === 'ombro' ? 'on' : ''} title="Resumos locais das tarefas terminadas" onClick={() => setState({ side: side === 'ombro' ? undefined : 'ombro' })}>Ombro</button>
+      </div>
+      <AddMenu ws={ws} floorId={floorId} />
+      {floor?.status?.text && <div className="floor-status muted small">{floor.name}: {floor.status.text}</div>}
     </div>
   );
 }
@@ -248,11 +290,17 @@ export function App() {
         {ws && floorId && (
           <>
             <TopBar ws={ws} floorId={floorId} />
-            <ReactFlowProvider key={`${ws.id}:${floorId}`}>
-              <Canvas ws={ws} floorId={floorId} />
-            </ReactFlowProvider>
+            <div className="stage">
+              <div className="stage-main">
+                <ReactFlowProvider key={`${ws.id}:${floorId}`}>
+                  <Canvas ws={ws} floorId={floorId} />
+                </ReactFlowProvider>
+                <ComputerBar />
+                <Panel ws={ws} floorId={floorId} />
+              </div>
+              <SidePanel ws={ws} />
+            </div>
             <Composer ws={ws} />
-            <Panel ws={ws} floorId={floorId} />
           </>
         )}
       </main>

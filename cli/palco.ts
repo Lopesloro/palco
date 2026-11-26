@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import http from 'node:http';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
@@ -20,6 +22,8 @@ function readConfig(): { token: string; port: number } | undefined {
 const port = () => Number(process.env.PALCO_PORT || readConfig()?.port || 4747);
 const base = () => process.env.PALCO_URL || `http://127.0.0.1:${port()}`;
 const token = () => process.env.PALCO_TOKEN || readConfig()?.token || '';
+/** The browser needs the master token, never a terminal's own token. */
+const masterToken = () => readConfig()?.token || '';
 
 async function health(): Promise<{ ok: boolean; version: string; pid: number } | undefined> {
   try {
@@ -224,29 +228,87 @@ async function readStdin(): Promise<string | undefined> {
   return s.length ? s.replace(/\n$/, '') : undefined;
 }
 
-async function agentCommand(argv: string[]) {
-  const h = await health();
-  if (!h) {
-    console.error('O Palco não está rodando. Rode `palco` para abrir.');
-    process.exit(2);
+/** POST without fetch: undici aborts any response whose headers take more than 5 minutes. */
+function postJson(urlPath: string, body: unknown, timeoutMs: number): Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlPath, base());
+    const data = Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, Authorization: `Bearer ${token()}` },
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode ?? 0, json: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') }); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('tempo esgotado esperando o Palco')));
+    req.on('error', reject);
+    req.end(data);
+  });
+}
+
+/** File transport for sandboxed agents (Codex) that cannot open sockets. */
+async function viaMailbox(body: { argv: string[]; callerId?: string; stdin?: string }, timeoutMs: number) {
+  const dir = process.env.PALCO_MAILBOX;
+  if (!dir || !fs.existsSync(dir)) return undefined;
+  const id = crypto.randomUUID();
+  const req = path.join(dir, `${id}.req.json`);
+  const res = path.join(dir, `${id}.res.json`);
+  fs.writeFileSync(`${req}.tmp`, JSON.stringify({ id, token: token(), ...body }), { mode: 0o600 });
+  fs.renameSync(`${req}.tmp`, req);
+  const end = Date.now() + timeoutMs;
+  const pickupBy = Date.now() + 8000;
+  while (!fs.existsSync(res)) {
+    if (fs.existsSync(req) && Date.now() > pickupBy) {
+      fs.rmSync(req, { force: true });
+      throw new Error('O Palco não respondeu pela caixa de correio. Ele está rodando? (palco status, fora do sandbox)');
+    }
+    if (Date.now() > end) throw new Error('tempo esgotado esperando o Palco');
+    await sleep(150);
   }
+  const out = JSON.parse(fs.readFileSync(res, 'utf8')) as { out: string; code: number };
+  fs.rmSync(res, { force: true });
+  return out;
+}
+
+async function agentCommand(argv: string[]) {
   const needsStdin = ['say', 'ask', 'notify', 'note'].includes(argv[0]);
   const stdin = needsStdin ? await readStdin() : undefined;
-  const timeoutIdx = argv.indexOf('--timeout');
-  const extra = timeoutIdx >= 0 ? 60_000 : 0;
-  const r = await fetch(`${base()}/api/cli`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token()}` },
-    body: JSON.stringify({ argv, callerId: process.env.PALCO_TERMINAL_ID, stdin }),
-    signal: AbortSignal.timeout(6 * 3_600_000 + extra),
-  });
-  if (r.status === 401) {
-    console.error('Token recusado. Este terminal foi aberto por outra instalação do Palco?');
-    process.exit(2);
+  const timeoutMs = 6 * 3_600_000;
+  const body = { argv, callerId: process.env.PALCO_TERMINAL_ID, stdin };
+  let result: { out?: string; code?: number; error?: string } | undefined;
+  try {
+    const r = await postJson('/api/cli', body, timeoutMs);
+    if (r.status === 401) {
+      console.error('Token recusado. Este terminal foi aberto por outra instalação do Palco?');
+      process.exit(2);
+    }
+    result = r.json;
+  } catch (err) {
+    // Only when the request never left this process (no socket in a sandbox, server down) is it safe
+    // to retry through the mailbox. After that, the server may already be running the command.
+    const code = (err as NodeJS.ErrnoException).code ?? '';
+    if (!['EPERM', 'EACCES', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ENOTFOUND', 'EADDRNOTAVAIL'].includes(code)) {
+      console.error(`A conexão com o Palco caiu no meio do comando (${(err as Error).message}). Ele pode ter sido executado: confira com \`palco check\` antes de repetir.`);
+      process.exit(2);
+    }
+    try {
+      result = await viaMailbox(body, timeoutMs);
+    } catch (e) {
+      console.error((e as Error).message);
+      process.exit(2);
+    }
+    if (!result) {
+      console.error(`O Palco não está acessível (${(err as Error).message}). Rode \`palco\` para abrir.`);
+      process.exit(2);
+    }
   }
-  const body = (await r.json()) as { out?: string; code?: number; error?: string };
-  const out = body.out ?? body.error ?? '';
-  if (body.code) { console.error(out); process.exit(body.code); }
+  if (!result) process.exit(2);
+  const out = result.out ?? result.error ?? '';
+  if (result.code) { console.error(out); process.exit(result.code); }
   if (out) console.log(out);
 }
 
@@ -256,7 +318,7 @@ async function main() {
   switch (cmd) {
     case undefined: case 'open': {
       const h = await ensureRunning();
-      const u = `${base()}/#token=${token()}`;
+      const u = `${base()}/#token=${masterToken()}`;
       openBrowser(u);
       console.log(`Palco ${h.version} aberto em ${base()}`);
       return;
@@ -279,7 +341,7 @@ async function main() {
     case 'install': return install();
     case 'uninstall': return uninstall();
     case 'doctor': return doctor();
-    case 'url': return console.log(`${base()}/#token=${token()}`);
+    case 'url': return console.log(`${base()}/#token=${masterToken()}`);
     case 'version': case '--version': case '-v': return console.log(JSON.parse(fs.readFileSync(path.join(PKG, 'package.json'), 'utf8')).version);
     default: return agentCommand(argv);
   }

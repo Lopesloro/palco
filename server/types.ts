@@ -1,4 +1,4 @@
-export type NodeType = 'terminal' | 'note' | 'portal' | 'band' | 'drawing';
+export type NodeType = 'terminal' | 'note' | 'portal' | 'band' | 'drawing' | 'device';
 
 export interface TerminalData {
   name: string;
@@ -11,6 +11,7 @@ export interface TerminalData {
   icon?: string;
   chat: boolean;
   maestro?: boolean;
+  ombro?: boolean;
 }
 
 export interface NoteData {
@@ -26,6 +27,12 @@ export interface PortalData {
   url: string;
   viewport: { width: number; height: number };
   ua?: 'desktop' | 'ios' | 'android';
+}
+
+export interface DeviceData {
+  name: string;
+  platform: 'android' | 'ios';
+  deviceId?: string;
 }
 
 export interface BandData {
@@ -164,6 +171,7 @@ export interface Config {
     terminalFontSize: number;
     theme: 'system' | 'dark' | 'light';
     notifications: boolean;
+    ombro?: boolean;
   };
 }
 

@@ -42,7 +42,10 @@ export function XTerm({ id }: { id: string }) {
       }
     });
     const offOpen = onMessage((m) => { if (m.t === 'open') send({ t: 'attach', id }); });
-    const sub = term.onData((d) => send({ t: 'input', id, data: d }));
+    // Automatic terminal replies (cursor position, device attributes, colors) come from the server's
+    // headless terminal; sending the browser's too would duplicate them into the agent's input.
+    const AUTO_REPLY = /^(\x1b\[\d+;\d+R|\x1b\[[?>][\d;]*c|\x1b\][0-9]+;rgb:[^\x07\x1b]*(\x07|\x1b\\)|\x1b\[\?\d+;\d+\$y)$/;
+    const sub = term.onData((d) => { if (!AUTO_REPLY.test(d)) send({ t: 'input', id, data: d }); });
     let last = '';
     const doFit = () => {
       if (!host.current || host.current.offsetWidth < 20) return;

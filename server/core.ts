@@ -1,7 +1,10 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { PALCO_HOME } from './paths.js';
 import { execFile } from 'node:child_process';
 import { Store, uid, now, randomColor } from './store.js';
-import { SessionManager, typePrompt, decodeRaw, type Session } from './sessions.js';
+import { SessionManager, typePrompt, decodeRaw, extractReply, attentionReason, type Session } from './sessions.js';
 import type {
   BandData, Edge, NodeType, NoteData, PalcoNode, PortalData, Preset, TerminalData, Workspace,
 } from './types.js';
@@ -18,6 +21,7 @@ const SIZE: Record<NodeType, [number, number]> = {
   portal: [900, 640],
   band: [260, 220],
   drawing: [10, 10],
+  device: [380, 760],
 };
 
 interface Waiter {
@@ -35,12 +39,52 @@ export interface Reach {
 
 export const nameOf = (n: PalcoNode) => String((n.data as { name?: string }).name ?? '');
 
+export interface Activity {
+  id: number;
+  at: string;
+  kind: 'ask' | 'reply' | 'done' | 'say' | 'note' | 'recruit' | 'connect' | 'blocked' | 'user';
+  from?: string;
+  to?: string;
+  fromId?: string;
+  toId?: string;
+  wsId?: string;
+  text: string;
+}
+
 export class Core extends EventEmitter {
   waiters: Waiter[] = [];
+  activity: Activity[] = [];
+  private activitySeq = 0;
+  private activityTimer?: NodeJS.Timeout;
+  private activityFile = path.join(PALCO_HOME, 'activity.json');
+
+  private loadActivity() {
+    try {
+      this.activity = JSON.parse(fs.readFileSync(this.activityFile, 'utf8'));
+      this.activitySeq = this.activity.reduce((m, a) => Math.max(m, a.id), 0);
+    } catch { this.activity = []; }
+  }
+
+  /** Everything that passes between agents, notes and the human, for the Activity panel. */
+  log(a: Omit<Activity, 'id' | 'at' | 'wsId'> & { wsId?: string }) {
+    const anchor = a.fromId ?? a.toId;
+    const wsId = a.wsId ?? (anchor ? this.store.findWorkspaceOfNode(anchor)?.ws.id : undefined);
+    const entry: Activity = { ...a, wsId, id: ++this.activitySeq, at: new Date().toISOString(), text: a.text.slice(0, 600) };
+    this.activity.push(entry);
+    if (this.activity.length > 400) this.activity.splice(0, this.activity.length - 400);
+    this.emit('activity', entry);
+    clearTimeout(this.activityTimer);
+    this.activityTimer = setTimeout(() => {
+      try { fs.writeFileSync(this.activityFile, JSON.stringify(this.activity)); } catch { /* best effort */ }
+    }, 500);
+  }
   portalHook?: { close(nodeId: string): void };
+  deviceHook?: { close(nodeId: string): void };
+  computer?: import('./computer.js').Computer;
 
   constructor(public store: Store, public sessions: SessionManager) {
     super();
+    this.loadActivity();
   }
 
   // ---------------------------------------------------------------- lookups
@@ -143,7 +187,7 @@ export class Core extends EventEmitter {
         const n = this.nodeById(id);
         if (!n || id === callerId) continue;
         if (n.type === 'terminal') agents.set(id, n as PalcoNode<TerminalData>);
-        else if (n.type === 'portal') portals.set(id, n as PalcoNode<PortalData>);
+        else if (n.type === 'portal' || n.type === 'device') portals.set(id, n as PalcoNode<PortalData>);
         else if (n.type === 'note') noteQueue.push({ id, depth: 0 });
         else if (n.type === 'band') {
           const b = n as PalcoNode<BandData>;
@@ -262,6 +306,7 @@ export class Core extends EventEmitter {
     if (node.type === 'terminal') this.sessions.stop(nodeId, true);
     if (node.type === 'note') this.store.deleteNoteFile(ws.id, nodeId);
     if (node.type === 'portal') this.portalHook?.close(nodeId);
+    if (node.type === 'device') this.deviceHook?.close(nodeId);
     // bands with fewer than two members dissolve on their own
     for (const b of ws.nodes.filter((n) => n.type === 'band')) {
       if ((b.data as BandData).members.length < 2 && node.type === 'terminal') this.removeNode(ws, b.id);
@@ -269,13 +314,13 @@ export class Core extends EventEmitter {
     this.store.touch(ws);
   }
 
-  connect(ws: Workspace, a: string, b: string): Edge {
+  connect(ws: Workspace, a: string, b: string, opts: { quiet?: boolean } = {}): Edge {
     if (a === b) throw new PalcoError('Não dá para conectar um nó a ele mesmo.');
     const na = this.nodeById(a), nb = this.nodeById(b);
     if (!na || !nb) throw new PalcoError('Nó não encontrado');
     const types = new Set([na.type, nb.type]);
     if (types.has('drawing')) throw new PalcoError('Desenhos não recebem cordas.');
-    if (types.has('portal') && types.has('note')) throw new PalcoError('Notas não se conectam a portais.');
+    if ((types.has('portal') || types.has('device')) && types.has('note')) throw new PalcoError('Notas não se conectam a portais nem dispositivos.');
     if (na.type === 'portal' && nb.type === 'portal') throw new PalcoError('Dois portais não se conectam por corda.');
     const sameFloor = na.floorId === nb.floorId;
     if (!sameFloor && !(na.type === 'terminal' && nb.type === 'terminal') && !(types.has('band') && types.has('terminal'))) {
@@ -285,6 +330,7 @@ export class Core extends EventEmitter {
     if (existing) return existing;
     const edge: Edge = { id: uid(), a, b, createdAt: now() };
     ws.edges.push(edge);
+    if (!opts.quiet) this.log({ kind: 'connect', from: nameOf(na), fromId: a, to: nameOf(nb), toId: b, wsId: ws.id, text: `corda entre ${nameOf(na)} e ${nameOf(nb)}` });
     this.store.touch(ws);
     return edge;
   }
@@ -359,11 +405,20 @@ export class Core extends EventEmitter {
         const caller = this.nodeById(callerId)!;
         w.resolve(`Resposta de ${this.displayName(caller, ws)}:\n${text}`);
         this.logChat(node.id, 'peer', text, nameOf(caller));
+        this.log({ kind: 'reply', from: nameOf(caller), fromId: caller.id, to: nameOf(node), toId: node.id, text });
         return `Entregue a ${this.displayName(node)} (resposta à pergunta que estava esperando).`;
       }
     }
 
     const s = this.session(node.id);
+    const caller0 = callerId ? this.nodeById(callerId) : undefined;
+    const blocked = this.blockedReason(node.id);
+    if (blocked && (callerId || !opts.raw)) {
+      // Never type into a trust/update/permission prompt: Enter would pick the highlighted option.
+      // The human was already notified when the terminal entered this state.
+      this.log({ kind: 'blocked', from: caller0 ? nameOf(caller0) : 'Você', fromId: caller0?.id, to: nameOf(node), toId: node.id, text: `${nameOf(node)} ${blocked}; nada foi digitado.` });
+      throw new PalcoError(`${nameOf(node)} está parado esperando o usuário (${blocked}). Nada foi enviado. O usuário foi avisado; tente de novo depois que ele responder no terminal.`, 3);
+    }
     if (opts.raw) {
       s.write(decodeRaw(text));
       await new Promise((r) => setTimeout(r, 600));
@@ -377,6 +432,7 @@ export class Core extends EventEmitter {
       ? `[Palco] Mensagem de "${this.displayName(caller, ws)}". Se for uma tarefa, ao terminar responda com: palco ask "${this.displayName(caller, ws)}" "<resultado>"\n\n`
       : '';
     this.logChat(node.id, caller ? 'peer' : 'user', text, caller ? nameOf(caller) : undefined);
+    this.log({ kind: caller ? 'ask' : 'user', from: caller ? nameOf(caller) : 'Você', fromId: caller?.id, to: nameOf(node), toId: node.id, text });
     const seqBefore = s.outputSeq;
     typePrompt(s, header + text, !isShell);
 
@@ -391,13 +447,42 @@ export class Core extends EventEmitter {
       const waiter: Waiter = { from: callerId ?? '__user__', to: node.id, resolve: finish };
       if (callerId) this.waiters.push(waiter);
       this.waitIdle(s, timeoutMs, true, seqBefore).then((r) => {
+        if (done) return;
         if (r === 'timeout') {
-          finish(`⏱  Tempo esgotado esperando ${nameOf(node)}. Não reenvie: use \`palco check "${nameOf(node)}"\` e espere de novo. Se pediu "ask back", a resposta chega como nova mensagem.\n\n${s.screen()}`);
+          finish(`⏱  Tempo esgotado esperando ${nameOf(node)}. Não reenvie: use \`palco check "${nameOf(node)}"\` e espere de novo. Se pediu "ask back", a resposta chega como nova mensagem.\n\n${extractReply(s.tail(80), text)}`);
+        } else if (s.status === 'attention' || attentionReason(s.screen())) {
+          finish(`${nameOf(node)} parou esperando o usuário (${s.attention ?? attentionReason(s.screen())}). O usuário foi avisado.\n\n${extractReply(s.tail(60), text)}`);
         } else {
-          finish(s.screen());
+          const reply = extractReply(s.tail(160), header + text);
+          this.log({ kind: 'done', from: nameOf(node), fromId: node.id, to: caller ? nameOf(caller) : 'Você', toId: caller?.id, text: reply });
+          finish(reply);
         }
       });
     });
+  }
+
+  /** Why a terminal must not be typed into right now (a prompt only the human may answer). */
+  blockedReason(nodeId: string) {
+    const s = this.sessions.get(nodeId);
+    if (!s || s.exited) return undefined;
+    return s.status === 'attention' ? s.attention : attentionReason(s.screen());
+  }
+
+  /**
+   * Types a prompt into a terminal unless it is waiting on the human. Every path that types for
+   * someone (notes, composer, chat, routines) goes through here.
+   */
+  deliver(nodeId: string, text: string, opts: { from?: string } = {}) {
+    const node = this.nodeById(nodeId);
+    if (!node || node.type !== 'terminal') throw new PalcoError('Não é um terminal.');
+    const why = this.blockedReason(nodeId);
+    if (why) {
+      this.log({ kind: 'blocked', from: opts.from ?? 'Você', to: nameOf(node), toId: nodeId, text: `${nameOf(node)} ${why}; nada foi digitado.` });
+      throw new PalcoError(`${nameOf(node)} está esperando você (${why}). Responda no terminal dele; nada foi enviado.`, 3);
+    }
+    const s = this.session(nodeId);
+    typePrompt(s, text, (node.data as TerminalData).agentType !== 'shell');
+    return s;
   }
 
   logChat(nodeId: string, from: 'user' | 'peer' | 'agent' | 'system', text: string, name?: string) {
@@ -407,12 +492,10 @@ export class Core extends EventEmitter {
 
   /** The human talking to an agent from the chat face of a terminal. */
   chatSend(nodeId: string, text: string, attachments: string[] = []) {
-    const s = this.session(nodeId);
-    this.store.appendChat(this.locate(nodeId).ws.id, nodeId, { from: 'user', text, attachments });
     const files = attachments.length ? `\n\nArquivos anexados:\n${attachments.map((a) => `- ${a}`).join('\n')}` : '';
     const shell = (this.locate(nodeId).node.data as TerminalData).agentType === 'shell';
-    if (shell) return typePrompt(s, text, false);
-    typePrompt(s, `---\nMensagem do usuário pelo Palco Chat. Responda somente com \`palco say\` (a skill palco explica).\n---\n${text}${files}`);
+    this.deliver(nodeId, shell ? text : `---\nMensagem do usuário pelo Palco Chat. Responda somente com \`palco say\` (a skill palco explica).\n---\n${text}${files}`);
+    this.store.appendChat(this.locate(nodeId).ws.id, nodeId, { from: 'user', text, attachments });
   }
 
   notify(text: string, title = 'Palco') {

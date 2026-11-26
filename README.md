@@ -29,6 +29,25 @@ palco
 | `palco stop` / `start` / `restart` | controla o serviço |
 | `palco uninstall` | remove o serviço (os dados ficam em `~/.palco`) |
 
+## Primeiros passos
+
+1. **Abra:** `palco` no terminal. O navegador abre o canvas.
+2. **Escolha o workspace** na barra lateral (ou `＋ Workspace`), apontando para a pasta do projeto.
+3. **Adicione agentes:** `＋ Adicionar` → Claude Code, Codex ou Shell. Cada um é um terminal real.
+4. **Ligue com cordas:** arraste da bolinha lateral de um cartão até outro. Só o que está ligado se enxerga:
+   - agente ↔ agente: conversam com `palco ask`;
+   - agente ↔ nota: o agente lê e escreve a nota;
+   - agente ↔ portal ou dispositivo: o agente opera o navegador ou o aparelho.
+   A linha "ligado a" no topo de cada cartão mostra as conexões.
+5. **Peça o trabalho** de três jeitos:
+   - digitando no terminal do cartão;
+   - pelo **Chat** do cartão (conversa formatada; o agente responde com `palco say`);
+   - pelo **compositor** embaixo (`⌘K`): escreva `@Claude peça ao @Codex para revisar…`; selecionar cartões também define os destinatários.
+6. **Acompanhe:** o painel **Atividade** lista cada mensagem entre agentes, notas e você, e a corda pisca quando algo passa. O **Ombro** resume o que cada agente terminou.
+7. **Quando um cartão ficar vermelho ("precisa de você"),** o agente parou num aviso que só você pode responder (confiar na pasta, atualizar, permitir uma ação). Responda no próprio terminal. Até lá o Palco não digita nada nele, para não escolher uma opção por você.
+
+Dica: o botão ➤ de uma nota envia o conteúdo dela aos agentes ligados.
+
 ## O que tem
 
 - **Canvas infinito** com zoom, minimapa, seleção múltipla, caneta, setas e retângulos.
@@ -43,6 +62,12 @@ palco
 - **Routines**: prompts, comandos ou lembretes agendados (`--every 30m`, `--at 09:00`, cron ou data única).
 - **Partituras**: salve uma equipe (agentes, roles, notas e cordas) e coloque de novo com um clique.
 - **Compositor** (`⌘K`): um prompt para vários terminais, com `@`menções e imagens coladas.
+- **Atividade**: linha do tempo de tudo que passa entre agentes, notas e você, com as cordas pulsando no canvas.
+- **"Precisa de você"**: o Palco reconhece avisos de confiança, atualização, permissão e sim/não, avisa você e não digita nada no agente até você responder.
+- **Computer use**: agentes operam outros apps do Mac (`palco computer …`) pelo Palco Helper, só com a sua autorização por 15 min ou 1 h. O botão "Parar tudo" revoga todos.
+- **Dispositivos**: celular ou emulador Android (adb) e Simulador iOS (Xcode) como cartões, com toque e digitação.
+- **Ombro**: resumo local (Apple Intelligence, nada sai do Mac) de cada tarefa terminada, com sugestão do próximo passo.
+- **Agentes em sandbox** (Codex): quando a rede está bloqueada, o `palco` usa uma caixa de correio em arquivo, sem configuração.
 - **Importação do Maestri**: em Configurações, traz workspaces de `~/.maestri` (terminais, notas e cordas) sem alterar a origem.
 
 ## Agentes conversando

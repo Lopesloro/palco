@@ -185,6 +185,7 @@ function Partituras({ ws, floorId }: { ws: Workspace; floorId: string }) {
 function Settings() {
   const settings = useStore((s) => s.config?.settings);
   const version = useStore((s) => s.version);
+  const helper = useStore((s) => s.helper);
   if (!settings) return null;
   const save = (patch: Partial<typeof settings>) => op('settings.update', { settings: patch }).catch(err);
   return (
@@ -197,6 +198,14 @@ function Settings() {
         <small>Vale para terminais abertos depois.</small></label>
       <label className="field check"><span>Notificações do sistema</span>
         <input type="checkbox" defaultChecked={settings.notifications} onChange={(e) => save({ notifications: e.target.checked })} /></label>
+      <label className="field check"><span>Ombro: resumir tarefas terminadas (Apple Intelligence, local)</span>
+        <input type="checkbox" defaultChecked={settings.ombro !== false} onChange={(e) => save({ ombro: e.target.checked })} /></label>
+      <hr />
+      <h4>Computer use</h4>
+      <p className="muted small">{helper
+        ? 'Os agentes operam outros apps pelo Palco Helper, sempre com a sua autorização por tempo limitado. Na primeira vez, o macOS pede para liberar o "Palco Helper" em Acessibilidade e em Gravação de Tela.'
+        : 'Palco Helper ausente: reinstale com ./scripts/install.sh (precisa de macOS com swiftc).'}</p>
+      {helper && <button onClick={() => cli(['computer', 'trust']).then((r) => toast(r.out, 'Acessibilidade'))}>Pedir permissão de Acessibilidade ao macOS</button>}
       <hr />
       <button onClick={async () => {
         const r = await op<{ message: string }>('import.maestri').catch((e) => ({ message: (e as Error).message }));

@@ -89,7 +89,7 @@ export function Icon({ children, title, onClick, active, className }: { children
   );
 }
 
-export const STATUS_LABEL: Record<string, string> = { starting: 'iniciando', busy: 'trabalhando', idle: 'esperando', exited: 'encerrado' };
+export const STATUS_LABEL: Record<string, string> = { starting: 'iniciando', busy: 'trabalhando', idle: 'pronto', attention: 'precisa de você', exited: 'encerrado' };
 
 export function StatusDot({ status }: { status?: string }) {
   return <span className={`dot st-${status ?? 'exited'}`} title={STATUS_LABEL[status ?? 'exited']} />;

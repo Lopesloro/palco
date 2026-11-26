@@ -9,7 +9,6 @@ const token = (name: string) => (/\s/.test(name) ? `@"${name}"` : `@${name}`);
 /** Floating prompt box: talk to one or many terminals, @-mention agents, notes and portals. */
 export function Composer({ ws }: { ws: Workspace }) {
   const selection = useStore((s) => s.selection);
-  const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [files, setFiles] = useState<string[]>([]);
   const [mention, setMention] = useState<{ q: string; start: number; idx: number }>();
@@ -25,7 +24,7 @@ export function Composer({ ws }: { ws: Workspace }) {
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setOpen(true); setTimeout(() => ta.current?.focus(), 20); }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); ta.current?.focus(); }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
@@ -72,22 +71,21 @@ export function Composer({ ws }: { ws: Workspace }) {
     }
   };
 
-  if (!open) {
-    return <button className="composer-fab" title="Compositor (⌘K)" onClick={() => { setOpen(true); setTimeout(() => ta.current?.focus(), 20); }}>✎ Compor <kbd>⌘K</kbd></button>;
-  }
   return (
-    <div className="composer">
-      <div className="composer-head">
-        <span>Para: {targets.length ? targets.map((t) => <b key={t.id} className="chip">{nm(t)}</b>) : <span className="muted">selecione terminais ou use @</span>}</span>
-        <span className="spacer" />
-        <button className="ghost" onClick={() => setOpen(false)}>Fechar</button>
+    <div className="composer-dock">
+      <div className="composer-to">
+        <span className="muted small">Para</span>
+        {targets.length
+          ? targets.map((t) => <b key={t.id} className="chip">{nm(t)}</b>)
+          : <span className="muted small">selecione cartões no canvas ou escreva @Nome</span>}
       </div>
       {files.length > 0 && <div className="chips">{files.map((f, i) => <span key={f} className="chip">🖼 {f.split('/').pop()} <b onClick={() => setFiles(files.filter((_, j) => j !== i))}>×</b></span>)}</div>}
       <textarea
         ref={ta}
         value={text}
-        rows={3}
-        placeholder="Escreva um prompt. @ menciona agentes, notas e portais. Enter envia, Shift+Enter quebra linha. Cole imagens."
+        rows={1}
+        placeholder="Mensagem para os agentes… (@ menciona agentes, notas e portais · Enter envia · Shift+Enter quebra linha · ⌘K foca)"
+        onInput={(e) => { const el = e.currentTarget; el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 180)}px`; }}
         onChange={(e) => onChange(e.target.value, e.target.selectionStart)}
         onPaste={async (e) => {
           const imgs = [...e.clipboardData.files].filter((f) => f.type.startsWith('image/'));
@@ -106,6 +104,7 @@ export function Composer({ ws }: { ws: Workspace }) {
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void submit(); }
         }}
       />
+      <button className="primary send" disabled={!text.trim()} onClick={() => void submit()}>Enviar</button>
       {mention && options.length > 0 && (
         <ul className="mentions">
           {options.map((n, i) => (

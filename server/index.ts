@@ -11,6 +11,11 @@ import { Routines } from './routines.js';
 import { Portals } from './portals.js';
 import { Commands } from './commands.js';
 import { importMaestri } from './importer.js';
+import { Computer } from './computer.js';
+import { Devices } from './devices.js';
+import { Ombro } from './ombro.js';
+import { helperAvailable } from './native.js';
+import { Mailbox } from './mailbox.js';
 import { CLI_BIN_DIR, PALCO_HOME, PKG_ROOT, WEB_DIR } from './paths.js';
 import type { BandData, NoteData, PalcoNode, PortalData, Preset, Role, Routine, TerminalData } from './types.js';
 
@@ -82,7 +87,25 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
   const floors = new Floors(core);
   const routines = new Routines(core);
   const portals = new Portals(core);
-  const commands = new Commands(core, floors, routines, portals);
+  const computer = new Computer(core);
+  core.computer = computer;
+  const devices = new Devices(core);
+  core.deviceHook = { close: (id) => devices.unwatch(id, true) };
+  const ombro = new Ombro(core);
+  const commands = new Commands(core, floors, routines, portals, computer, devices, ombro);
+  const mailbox = new Mailbox((token) => {
+    if (tokenOk(token, store.config.token)) return { human: true };
+    const s = sessions.byToken(token);
+    return s ? { callerId: s.nodeId } : undefined;
+  }, async (req, who) => {
+    try {
+      const callerId = who.human ? req.callerId || undefined : who.callerId;
+      return { out: await commands.run(req.argv ?? [], { callerId, stdin: req.stdin }), code: 0 };
+    } catch (e) {
+      return { out: (e as Error).message, code: e instanceof PalcoError ? e.code : 1 };
+    }
+  });
+  mailbox.start();
 
   // boot terminals of loaded workspaces/floors
   for (const ws of store.orderedWorkspaces()) {
@@ -108,8 +131,21 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
   store.on('note', (wsId, nodeId, content) => broadcast({ t: 'note', wsId, nodeId, content }));
   store.on('chat', (wsId, nodeId, entry) => broadcast({ t: 'chat', wsId, nodeId, entry }));
   sessions.on('data', (_ws, id, data) => broadcast({ t: 'out', id, data }));
-  sessions.on('status', (_ws, id, status) => broadcast({ t: 'status', id, status }));
+  sessions.on('status', (_ws, id, status) => broadcast({ t: 'status', id, status, attention: sessions.get(id)?.attention }));
   core.on('notify', (n) => broadcast({ t: 'notify', ...n }));
+  core.on('activity', (a) => broadcast({ t: 'activity', a }));
+  sessions.on('attention', (_ws: string, id: string, why: string) => {
+    const n = core.nodeById(id);
+    if (n) core.notify(`${(n.data as { name: string }).name} ${why}. Abra o card no Palco e responda.`, 'Palco: precisa de você');
+  });
+  core.on('computer', (state) => broadcast({ t: 'computer', ...state }));
+  core.on('computer-activity', (a) => broadcast({ t: 'computer-activity', ...a, at: Date.now() }));
+  core.on('ombro', (entry) => broadcast({ t: 'ombro', entry }));
+  devices.on('frame', (id: string, data: string, fmt: string) => {
+    const s = JSON.stringify({ t: 'frame', id, data, fmt });
+    for (const c of clients) if (c.watching?.has(id) && c.readyState === c.OPEN && c.bufferedAmount < 8_000_000) c.send(s);
+  });
+  devices.on('error', (id: string, error: string) => broadcast({ t: 'portal-error', id, error }));
   portals.on('frame', (id: string, data: string) => {
     const s = JSON.stringify({ t: 'frame', id, data });
     for (const c of clients) if (c.watching?.has(id) && c.readyState === c.OPEN && c.bufferedAmount < 4_000_000) c.send(s);
@@ -125,7 +161,11 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
     clients.add(ws);
     ws.watching = new Set();
     const statuses = Object.fromEntries([...sessions.sessions.values()].map((s) => [s.nodeId, s.status]));
-    ws.send(JSON.stringify({ t: 'hello', version: VERSION, config: publicConfig(), workspaces: store.orderedWorkspaces(), statuses, home: process.env.HOME }));
+    ws.send(JSON.stringify({
+      t: 'hello', version: VERSION, config: publicConfig(), workspaces: store.orderedWorkspaces(), statuses, home: process.env.HOME,
+      computer: computer.list(), ombro: ombro.entries.slice(0, 20), helper: helperAvailable(),
+      activity: core.activity.slice(-150), attention: Object.fromEntries([...sessions.sessions.values()].filter((s) => s.attention).map((s) => [s.nodeId, s.attention])),
+    }));
     ws.on('message', (raw) => {
       let m: { t: string; id?: string; data?: string; cols?: number; rows?: number; ev?: unknown; width?: number; height?: number };
       try { m = JSON.parse(String(raw)); } catch { return; }
@@ -135,11 +175,18 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
       else if (m.t === 'attach') {
         const s = sessions.get(id);
         ws.send(JSON.stringify({ t: 'replay', id, data: s?.replay ?? '', status: s?.status ?? 'exited' }));
+      } else if (m.t === 'watch' && core.nodeById(id)?.type === 'device') {
+        ws.watching!.add(id);
+        devices.watch(id);
+      } else if (m.t === 'device-input') {
+        devices.input(id, m.ev as never).catch((e) => ws.send(JSON.stringify({ t: 'portal-error', id, error: (e as Error).message })));
       } else if (m.t === 'watch') {
         ws.watching!.add(id);
         portals.watch(id).catch((e) => ws.send(JSON.stringify({ t: 'portal-error', id, error: (e as Error).message })));
       } else if (m.t === 'unwatch') {
-        if (ws.watching!.delete(id)) void portals.unwatch(id);
+        if (ws.watching!.delete(id)) {
+          if (core.nodeById(id)?.type === 'device') devices.unwatch(id); else void portals.unwatch(id);
+        }
       } else if (m.t === 'portal-input') {
         portals.input(id, m.ev as never).catch(() => {});
       } else if (m.t === 'portal-viewport') {
@@ -148,7 +195,9 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
     });
     ws.on('close', () => {
       clients.delete(ws);
-      for (const id of ws.watching ?? []) void portals.unwatch(id);
+      for (const id of ws.watching ?? []) {
+        if (core.nodeById(id)?.type === 'device') devices.unwatch(id); else void portals.unwatch(id);
+      }
     });
   });
 
@@ -187,6 +236,7 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
       } else if (type === 'note') data = { name: 'Nota', color: 'yellow', locked: false, preview: false, ...data } satisfies NoteData;
       else if (type === 'portal') data = { name: 'Portal', url: '', viewport: { width: 1280, height: 800 }, ...data } satisfies PortalData;
       else if (type === 'band') data = { name: 'Band', members: [], color: '#9a8cf0', ...data } satisfies BandData;
+      else if (type === 'device') data = { name: 'Aparelho', platform: 'android', ...data };
       const node = core.addNode(w, type, data, { floorId: b.floorId, x: b.x, y: b.y, w: b.w, h: b.h });
       if (type === 'note' && typeof b.content === 'string') store.writeNote(w.id, node.id, b.content);
       return node;
@@ -278,21 +328,52 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
     },
     'term.screen': (b) => sessions.get(b.nodeId)?.tail(Number(b.lines) || 200) ?? '',
     'import.maestri': () => importMaestri(core),
+    'computer.list': () => computer.list(),
+    'computer.decide': (b) => { computer.decide(String(b.id), b.allow ? Number(b.minutes) || 15 : false); return computer.list(); },
+    'computer.revokeAll': () => { computer.revokeAll(); return computer.list(); },
+    'ombro.list': () => ombro.entries,
+    'ombro.dismiss': (b) => { ombro.dismiss(b.id); return true; },
+    'ombro.now': (b) => ombro.summarize(String(b.nodeId)),
+    'device.status': () => devices.status(),
+    'activity.list': () => core.activity,
+    'node.sendNote': (b) => {
+      // The human pushes a note's content to every agent wired to it.
+      const { ws: w, node } = core.locate(String(b.nodeId));
+      const content = store.readNote(w.id, node.id);
+      const name = (node.data as { name: string }).name;
+      const targets = core.neighbors(node.id).map((id) => core.nodeById(id)).filter((n) => n?.type === 'terminal');
+      if (!targets.length) throw new PalcoError('Esta nota não está ligada a nenhum agente. Arraste uma corda até um terminal.');
+      let sent = 0;
+      const skipped: string[] = [];
+      for (const t of targets) {
+        try {
+          core.deliver(t!.id, `[Palco] O usuário compartilhou a nota "${name}" com você:\n\n${content}`);
+          core.log({ kind: 'note', from: 'Você', to: (t!.data as { name: string }).name, toId: t!.id, text: `enviou a nota "${name}"` });
+          sent++;
+        } catch { skipped.push((t!.data as { name: string }).name); }
+      }
+      if (!sent) throw new PalcoError(`Ninguém recebeu: ${skipped.join(', ')} está(ão) esperando você responder no terminal.`);
+      return sent;
+    },
     'compose.send': async (b) => {
       // The human's composer: deliver one prompt to several terminals at once.
       const results: string[] = [];
       for (const id of b.targets as string[]) {
         const node = core.nodeById(id);
         if (!node || node.type !== 'terminal') continue;
-        const s = core.session(id);
         const d = node.data as TerminalData;
-        if (d.chat) core.chatSend(id, String(b.text), b.attachments ?? []);
-        else {
-          const files = (b.attachments as string[] | undefined)?.length ? `\n\n${(b.attachments as string[]).join('\n')}` : '';
-          typePrompt(s, `${b.text}${files}`, d.agentType !== 'shell');
-          core.logChat(id, 'user', String(b.text));
+        try {
+          if (d.chat) core.chatSend(id, String(b.text), b.attachments ?? []);
+          else {
+            const files = (b.attachments as string[] | undefined)?.length ? `\n\n${(b.attachments as string[]).join('\n')}` : '';
+            core.deliver(id, `${b.text}${files}`);
+            core.logChat(id, 'user', String(b.text));
+            core.log({ kind: 'user', from: 'Você', to: d.name, toId: id, text: String(b.text) });
+          }
+          results.push(id);
+        } catch (e) {
+          if (b.targets.length === 1) throw e;
         }
-        results.push(id);
       }
       return results;
     },
@@ -312,12 +393,16 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
       // <img> tags cannot send headers, so /api/file also accepts ?token=
       const auth = req.headers.authorization?.replace(/^Bearer\s+/i, '')
         ?? (u.pathname === '/api/file' ? u.searchParams.get('token') ?? undefined : undefined);
-      if (!tokenOk(auth, store.config.token)) return send(401, { error: 'token inválido; abra o Palco pelo comando `palco`' });
+      const human = tokenOk(auth, store.config.token);
+      const terminal = human ? undefined : sessions.byToken(auth);
+      // Terminal tokens only reach the CLI endpoint, and the caller is whoever owns the token.
+      if (!human && !(terminal && u.pathname === '/api/cli')) return send(401, { error: 'token inválido; abra o Palco pelo comando `palco`' });
       try {
         if (u.pathname === '/api/cli' && req.method === 'POST') {
           const body = JSON.parse(String(await readBody(req)) || '{}');
           try {
-            const out = await commands.run(body.argv ?? [], { callerId: body.callerId || undefined, stdin: body.stdin });
+            const callerId = terminal ? terminal.nodeId : body.callerId || undefined;
+            const out = await commands.run(body.argv ?? [], { callerId, stdin: body.stdin });
             return send(200, { out, code: 0 });
           } catch (e) {
             return send(200, { out: (e as Error).message, code: e instanceof PalcoError ? e.code : 1 });
@@ -391,6 +476,8 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
 
   const close = async () => {
     routines.stopAll();
+    devices.stopAll();
+    mailbox.stop();
     store.flushAll();
     for (const s of sessions.sessions.values()) sessions.persistScrollback(s);
     sessions.stopAll();

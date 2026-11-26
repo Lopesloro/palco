@@ -135,8 +135,10 @@ export class Routines {
         const s = this.core.session(node.id);
         if (r.skipIfBusy && s.status === 'busy' && !manual) {
           result = `pulada: ${nameOf(node)} estava ocupado`;
+        } else if (this.core.blockedReason(node.id)) {
+          result = `pulada: ${nameOf(node)} está esperando você (${this.core.blockedReason(node.id)})`;
         } else {
-          if (r.kind === 'prompt') typePrompt(s, `[Palco routine "${r.name}"]\n${r.command}`, (node.data as { agentType?: string }).agentType !== 'shell');
+          if (r.kind === 'prompt') this.core.deliver(node.id, `[Palco routine "${r.name}"]\n${r.command}`, { from: `routine ${r.name}` });
           else s.write(`${r.command}\r`);
           result = `enviada para ${nameOf(node)}`;
         }

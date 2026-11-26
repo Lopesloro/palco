@@ -1,6 +1,6 @@
 {
   "name": "palco",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local spatial workspace for AI coding agents: terminals, notes and browser portals on an infinite canvas.",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,7 @@
     "build": "npm run build:server && npm run build:web",
     "build:server": "tsc -p tsconfig.server.json && chmod +x dist/cli/palco.js",
     "build:web": "vite build",
+    "build:helper": "scripts/build-helper.sh",
     "dev:server": "tsx watch server/index.ts",
     "dev:web": "vite",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",

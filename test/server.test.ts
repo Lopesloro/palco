@@ -203,6 +203,53 @@ describe('agents', () => {
     expect((await cli(alpha, 'routine', 'delete', 'Pulso')).code).toBe(0);
   });
 
+  it('refuses to type into a menu that only the human may answer', async () => {
+    const r0 = await cli(alpha, 'recruit', 'Menu', '--command', '');
+    expect(r0.code).toBe(0);
+    await until(() => [...srv.core.sessions.sessions.values()].some((s) => s.status === 'idle'), 10000);
+    const menu = srv.core.byName('Menu').node.id;
+    await until(() => srv.core.sessions.get(menu)?.status === 'idle', 10000);
+    srv.core.sessions.get(menu)!.write(`printf '› 1. Update now\\n  2. Skip\\nPress enter to continue\\n'; read x\r`);
+    expect(await until(() => srv.core.sessions.get(menu)?.status === 'attention', 10000)).toBe(true);
+    const r = await cli(alpha, 'ask', 'Menu', 'echo nao-deveria-rodar');
+    expect(r.code).toBe(3);
+    await expect(op('compose.send', { targets: [menu], text: 'echo via-compositor' })).rejects.toThrow(/esperando você/);
+    await expect(op('chat.send', { nodeId: menu, text: 'echo via-chat' })).rejects.toThrow(/esperando você/);
+    expect(r.out).toMatch(/esperando o usuário/);
+    const after = (await cli(alpha, 'check', 'Menu')).out;
+    expect(after).not.toContain('nao-deveria-rodar');
+    expect(after).not.toContain('via-compositor');
+    expect(after).not.toContain('via-chat');
+    await cli(alpha, 'dismiss', 'Menu');
+  });
+
+  it('identifies agents by their own terminal token, which only opens the CLI', async () => {
+    const betaToken = srv.core.sessions.get(beta)!.token;
+    expect(betaToken).not.toBe(token);
+    const post = (pathName: string, body: unknown) => fetch(`${srv.url}${pathName}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${betaToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    // claiming to be Alpha does not work: the token says Beta
+    const r = await (await post('/api/cli', { argv: ['list'], callerId: alpha })).json();
+    expect(r.out).toContain('You: Beta');
+    expect((await post('/api/op', { op: 'computer.list' })).status).toBe(401);
+  });
+
+  it('answers sandboxed agents through the file mailbox', async () => {
+    const { mailboxDir } = await import('../server/mailbox.js');
+    const dir = mailboxDir();
+    expect(dir).toContain('palco-mailbox-');
+    const id = 'teste-mailbox';
+    fs.writeFileSync(path.join(dir, `${id}.req.json`), JSON.stringify({ id, token, argv: ['list'], callerId: alpha }));
+    expect(await until(() => fs.existsSync(path.join(dir, `${id}.res.json`)), 5000)).toBe(true);
+    const res = JSON.parse(fs.readFileSync(path.join(dir, `${id}.res.json`), 'utf8'));
+    expect(res.code).toBe(0);
+    expect(res.out).toContain('You: Alpha');
+    fs.writeFileSync(path.join(dir, 'x.req.json'), JSON.stringify({ id: 'x', token: 'errado', argv: ['list'] }));
+    expect(await until(() => fs.existsSync(path.join(dir, 'x.res.json')), 5000)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'x.res.json'), 'utf8')).code).toBe(2);
+  });
+
   it('chat: say lands in the chat log', async () => {
     expect((await cli(alpha, 'say', 'olá do agente')).code).toBe(0);
     const log = await op<{ from: string; text: string }[]>('chat.read', { nodeId: alpha });

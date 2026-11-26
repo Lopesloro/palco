@@ -5,7 +5,7 @@ import { getState, setState, toast, useStore } from '../store';
 import { Icon, Markdown, StatusDot, STATUS_LABEL, dialog, useDebounced } from '../ui';
 import { XTerm } from './XTerm';
 import { ChatView } from './ChatView';
-import type { BandData, DrawingData, NoteData, PalcoNode, PortalData, TerminalData } from '../types';
+import type { BandData, DeviceData, DrawingData, NoteData, PalcoNode, PortalData, TerminalData } from '../types';
 
 export interface NodeDataIn<T = unknown> {
   node: PalcoNode<T>;
@@ -24,6 +24,43 @@ function Ports() {
       <Handle type="source" position={Position.Left} id="l" className="port" />
       <Handle type="source" position={Position.Right} id="r" className="port" />
     </>
+  );
+}
+
+/** Names of the cards wired to this one (ropes and band mates), for the "ligado a" line. */
+function useLinks(wsId: string, nodeId: string) {
+  const ws = useStore((s) => s.workspaces.find((w) => w.id === wsId));
+  return useMemo(() => {
+    if (!ws) return [] as PalcoNode[];
+    const ids = new Set<string>();
+    for (const e of ws.edges) { if (e.a === nodeId) ids.add(e.b); if (e.b === nodeId) ids.add(e.a); }
+    for (const b of ws.nodes.filter((n) => n.type === 'band')) {
+      const m = (b.data as BandData).members;
+      if (m.includes(nodeId)) m.forEach((x) => x !== nodeId && ids.add(x));
+    }
+    return ws.nodes.filter((n) => ids.has(n.id));
+  }, [ws, nodeId]);
+}
+
+function LinksBar({ wsId, nodeId, empty }: { wsId: string; nodeId: string; empty: string }) {
+  const links = useLinks(wsId, nodeId);
+  const pulses = useStore((s) => s.pulses);
+  return (
+    <div className="links" title="Cartões ligados por corda. Arraste de uma bolinha lateral até outro cartão para ligar.">
+      {links.length === 0 ? <span className="muted">{empty}</span> : (
+        <>
+          <span className="muted">ligado a</span>
+          {links.map((l) => {
+            const hot = Object.entries(pulses).some(([k, t]) => k.includes(l.id) && k.includes(nodeId) && Date.now() - t < 2500);
+            return (
+              <button key={l.id} className={`chip ${hot ? 'hot' : ''}`} onClick={() => setState({ focusNode: { id: l.id, at: Date.now() } })}>
+                {l.type === 'note' ? '📝' : l.type === 'portal' ? '🌐' : l.type === 'device' ? '📱' : '✦'} {(l.data as { name: string }).name}
+              </button>
+            );
+          })}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -51,6 +88,8 @@ export const TerminalNode = memo(({ data, selected }: NodeProps) => {
   const roles = useStore((s) => s.config?.roles);
   const wsRoles = useStore((s) => s.workspaces.find((w) => w.id === wsId)?.roles);
   const role = [...(wsRoles ?? []), ...(roles ?? [])].find((r) => r.id === d.roleId);
+  const why = useStore((s) => s.attention[node.id]);
+  const helper = useStore((s) => s.helper);
   return (
     <div className={`card terminal ${selected ? 'sel' : ''} st-${status ?? 'exited'}`} style={{ ['--accent' as string]: d.color }}>
       <NodeResizer isVisible={selected} minWidth={360} minHeight={200} onResizeEnd={resizeEnd(wsId, node.id)} />
@@ -61,14 +100,24 @@ export const TerminalNode = memo(({ data, selected }: NodeProps) => {
         <b className="title">{d.name}</b>
         {d.maestro && <span className="tag">maestro</span>}
         {role && <span className="tag" title={role.prompt}>{role.name}</span>}
-        <span className="muted small">{STATUS_LABEL[status ?? 'exited']}</span>
+        <span className={`status-label st-${status ?? 'exited'}`}>{STATUS_LABEL[status ?? 'exited']}</span>
         <span className="spacer" />
-        <Icon title={d.chat ? 'Ver terminal' : 'Ver chat'} onClick={() => update(wsId, node.id, { chat: !d.chat })}>{d.chat ? '⌨' : '💬'}</Icon>
+        <div className="seg mini nodrag">
+          <button className={!d.chat ? 'on' : ''} title="Terminal" onClick={() => d.chat && update(wsId, node.id, { chat: false })}>Terminal</button>
+          <button className={d.chat ? 'on' : ''} title="Conversa formatada" onClick={() => !d.chat && update(wsId, node.id, { chat: true })}>Chat</button>
+        </div>
+        {helper && d.agentType !== 'shell' && <Icon title="Ombro: resumir o que este agente fez" onClick={() => op('ombro.now', { nodeId: node.id }).then(() => setState({ side: 'ombro' })).catch((e) => toast((e as Error).message, 'Ombro'))}>✧</Icon>}
         <Icon title="Interromper (Ctrl-C)" onClick={() => op('node.interrupt', { nodeId: node.id })}>⏹</Icon>
         <Icon title="Reiniciar processo" onClick={() => op('node.restart', { nodeId: node.id })}>↻</Icon>
         <Icon title="Configurar" onClick={() => configureTerminal(wsId, node)}>⚙</Icon>
         <Icon title="Remover" onClick={() => remove(wsId, node, 'terminal')}>✕</Icon>
       </header>
+      {status === 'attention' && (
+        <div className="attention-bar">
+          <b>Precisa de você:</b> {d.name} {why ?? 'espera uma resposta'}. Responda no terminal abaixo; enquanto isso, o Palco não envia nada para ele.
+        </div>
+      )}
+      <LinksBar wsId={wsId} nodeId={node.id} empty="sem cordas: ligue a um agente, nota ou portal para ele enxergar" />
       <div className="body">{d.chat ? <ChatView id={node.id} name={d.name} /> : <XTerm id={node.id} />}</div>
     </div>
   );
@@ -121,8 +170,10 @@ export const NoteNode = memo(({ data, selected }: NodeProps) => {
         </select>
         <Icon title={d.locked ? 'Destrancar (agentes podem editar)' : 'Trancar (agentes só leem)'} onClick={() => update(wsId, node.id, { locked: !d.locked })}>{d.locked ? '🔒' : '🔓'}</Icon>
         <Icon title={editing ? 'Visualizar' : 'Editar'} onClick={() => { setEditing(!editing); update(wsId, node.id, { preview: editing }); }}>{editing ? '👁' : '✎'}</Icon>
+        <Icon title="Enviar o conteúdo aos agentes ligados a esta nota" onClick={() => op<number>('node.sendNote', { nodeId: node.id }).then((n) => toast(`Nota enviada a ${n} agente(s).`, d.name)).catch((e) => toast((e as Error).message, d.name))}>➤</Icon>
         <Icon title="Remover" onClick={() => remove(wsId, node, 'nota')}>✕</Icon>
       </header>
+      <LinksBar wsId={wsId} nodeId={node.id} empty="nenhum agente lê esta nota: ligue com uma corda" />
       <div className="body nodrag nowheel">
         {editing ? (
           <textarea
@@ -309,4 +360,73 @@ export const DrawingNode = memo(({ data, selected }: NodeProps) => {
   );
 });
 
-export const nodeTypes = { terminal: TerminalNode, note: NoteNode, portal: PortalNode, band: BandNode, drawing: DrawingNode };
+
+// -------------------------------------------------------------------- device
+export const DeviceNode = memo(({ data, selected }: NodeProps) => {
+  const { node, wsId } = data as NodeDataIn<DeviceData>;
+  const d = node.data;
+  const img = useRef<HTMLImageElement>(null);
+  const [err, setErr] = useState('');
+  const [size, setSize] = useState<{ w: number; h: number }>();
+  const down = useRef<{ x: number; y: number; t: number } | undefined>(undefined);
+  useEffect(() => {
+    const off = onMessage((m) => {
+      if (m.id !== node.id) return;
+      if (m.t === 'frame' && img.current) {
+        img.current.src = `data:image/${m.fmt === 'png' ? 'png' : 'jpeg'};base64,${m.data}`;
+        setErr('');
+      }
+      if (m.t === 'portal-error') setErr(m.error);
+    });
+    send({ t: 'watch', id: node.id });
+    return () => { off(); send({ t: 'unwatch', id: node.id }); };
+  }, [node.id]);
+  const pt = (e: React.MouseEvent) => {
+    const r = img.current!.getBoundingClientRect();
+    const w = img.current!.naturalWidth, h = img.current!.naturalHeight;
+    return { x: ((e.clientX - r.left) / r.width) * w, y: ((e.clientY - r.top) / r.height) * h };
+  };
+  const input = (ev: Record<string, unknown>) => send({ t: 'device-input', id: node.id, ev });
+  return (
+    <div className={`card device ${selected ? 'sel' : ''}`}>
+      <NodeResizer isVisible={selected} minWidth={220} minHeight={360} keepAspectRatio onResizeEnd={resizeEnd(wsId, node.id)} />
+      <Ports />
+      <header className="drag-handle" onDoubleClick={() => rename(wsId, node as never)}>
+        <span className="ico">{d.platform === 'ios' ? '' : '🤖'}</span>
+        <b className="title">{d.name}</b>
+        <span className="tag">{d.platform === 'ios' ? 'Simulador iOS' : 'Android'}</span>
+        <span className="spacer" />
+        {d.platform === 'android' && <>
+          <Icon title="Voltar" onClick={() => input({ kind: 'key', key: 'back' })}>◁</Icon>
+          <Icon title="Início" onClick={() => input({ kind: 'key', key: 'home' })}>○</Icon>
+        </>}
+        <Icon title="Remover" onClick={() => remove(wsId, node, 'dispositivo')}>✕</Icon>
+      </header>
+      <LinksBar wsId={wsId} nodeId={node.id} empty="ligue a um agente para ele operar o aparelho" />
+      <div
+        className="body device-view nodrag nowheel nopan"
+        tabIndex={0}
+        onMouseDown={(e) => { if (img.current?.naturalWidth) down.current = { ...pt(e), t: Date.now() }; }}
+        onMouseUp={(e) => {
+          if (!down.current || !img.current?.naturalWidth) return;
+          const p = pt(e), s = down.current;
+          down.current = undefined;
+          if (Math.hypot(p.x - s.x, p.y - s.y) > 20) input({ kind: 'swipe', x: Math.round(s.x), y: Math.round(s.y), x2: Math.round(p.x), y2: Math.round(p.y) });
+          else input({ kind: 'tap', x: p.x, y: p.y });
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          if (e.key.length === 1) input({ kind: 'text', text: e.key });
+          else input({ kind: 'key', key: { Backspace: 'delete', Enter: 'enter', Escape: 'back', Tab: 'tab', ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }[e.key] ?? e.key });
+        }}
+        onKeyUp={(e) => e.stopPropagation()}
+      >
+        <img ref={img} alt="" draggable={false} onLoad={() => img.current && setSize({ w: img.current.naturalWidth, h: img.current.naturalHeight })} style={{ opacity: size ? 1 : 0 }} />
+        {!size && <div className="portal-wait">{err ? <span>{err}</span> : 'Conectando ao aparelho…'}</div>}
+      </div>
+    </div>
+  );
+});
+
+export const nodeTypes = { terminal: TerminalNode, note: NoteNode, portal: PortalNode, band: BandNode, drawing: DrawingNode, device: DeviceNode };

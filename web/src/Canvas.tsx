@@ -6,19 +6,19 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { op } from './api';
-import { setState, toast, useStore } from './store';
+import { pairKey, setState, toast, useStore } from './store';
 import { nodeTypes, noteColor, type NodeDataIn } from './nodes/nodes';
 import { dialog } from './ui';
 import type { BandData, DrawingData, PalcoNode, Workspace } from './types';
 
 function RopeEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, selected }: EdgeProps) {
   const [path] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, curvature: 0.35 });
-  const d = (data ?? {}) as { live?: boolean; band?: boolean };
+  const d = (data ?? {}) as { live?: boolean; band?: boolean; pulse?: boolean };
   return (
     <BaseEdge
       id={id}
       path={path}
-      className={`rope ${d.live ? 'live' : ''} ${d.band ? 'band-rope' : ''} ${selected ? 'sel' : ''}`}
+      className={`rope ${d.live ? 'live' : ''} ${d.pulse ? 'pulse' : ''} ${d.band ? 'band-rope' : ''} ${selected ? 'sel' : ''}`}
       interactionWidth={18}
     />
   );
@@ -41,6 +41,7 @@ const toRF = (n: PalcoNode, wsId: string, selected: boolean): RFNode => ({
 export function Canvas({ ws, floorId }: { ws: Workspace; floorId: string }) {
   const rf = useReactFlow();
   const statuses = useStore((s) => s.statuses);
+  const pulses = useStore((s) => s.pulses);
   const tool = useStore((s) => s.tool);
   const focus = useStore((s) => s.focusNode);
   const presets = useStore((s) => s.config?.presets);
@@ -64,9 +65,10 @@ export function Canvas({ ws, floorId }: { ws: Workspace; floorId: string }) {
   const edges = useMemo<RFEdge[]>(() => {
     const here = new Set(ws.nodes.filter((n) => n.floorId === floorId).map((n) => n.id));
     const busy = (id: string) => statuses[id] === 'busy';
+    const hot = (a: string, b: string) => Date.now() - (pulses[pairKey(a, b)] ?? 0) < 2500;
     const real = ws.edges.filter((e) => here.has(e.a) && here.has(e.b)).map((e) => ({
       id: e.id, source: e.a, target: e.b, sourceHandle: 'r', targetHandle: 'l', type: 'rope',
-      data: { live: busy(e.a) || busy(e.b) },
+      data: { live: busy(e.a) || busy(e.b), pulse: hot(e.a, e.b) },
     }));
     const bandLinks = ws.nodes.filter((n) => n.type === 'band' && n.floorId === floorId).flatMap((b) =>
       (b.data as BandData).members.filter((m) => here.has(m)).map((m) => ({
@@ -74,7 +76,7 @@ export function Canvas({ ws, floorId }: { ws: Workspace; floorId: string }) {
         selectable: false, deletable: false, data: { band: true, live: busy(m) },
       })));
     return [...real, ...bandLinks];
-  }, [ws, floorId, statuses]);
+  }, [ws, floorId, statuses, pulses]);
 
   // restore and remember the viewport per floor
   const restored = useRef('');
@@ -255,10 +257,14 @@ export function Canvas({ ws, floorId }: { ws: Workspace; floorId: string }) {
       )}
 
       {ws.nodes.filter((n) => n.floorId === floorId).length === 0 && (
-        <div className="empty-canvas">
-          <h2>Palco vazio</h2>
-          <p>Clique com o botão direito no canvas para adicionar um agente, nota ou portal — ou use os botões no topo.</p>
-          <p className="muted">Arraste de uma bolinha lateral até outro card para criar uma corda: agentes conectados conversam pela CLI <code>palco</code>.</p>
+        <div className="onboarding">
+          <h2>Monte sua equipe de agentes</h2>
+          <ol>
+            <li><b>Adicione agentes.</b> Botão <span className="kbd-like">＋ Adicionar</span> ou clique com o botão direito no canvas: Claude Code, Codex, shell.</li>
+            <li><b>Ligue com cordas.</b> Arraste da bolinha na lateral de um cartão até outro. Só o que está ligado se enxerga: agente com agente conversa, agente com nota lê e escreve.</li>
+            <li><b>Peça o trabalho.</b> Digite no terminal, use o Chat do cartão ou o compositor embaixo (<kbd>⌘K</kbd>). Ex.: "peça ao Codex para revisar e anote o resultado na nota Plano".</li>
+            <li><b>Acompanhe.</b> O painel <b>Atividade</b> mostra cada mensagem entre agentes, e a corda pisca quando algo passa.</li>
+          </ol>
         </div>
       )}
     </div>

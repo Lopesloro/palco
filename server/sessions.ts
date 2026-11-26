@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import type { IPty } from 'node-pty';
 import { CLI_BIN_DIR } from './paths.js';
+import { mailboxDir } from './mailbox.js';
 import type { Store } from './store.js';
 import type { PalcoNode, TerminalData, Workspace } from './types.js';
 
@@ -13,7 +15,81 @@ const pty = require('node-pty') as typeof import('node-pty');
 const { Terminal: HeadlessTerminal } = require('@xterm/headless') as typeof import('@xterm/headless');
 
 const REPLAY_LIMIT = 1_000_000;
-export type SessionStatus = 'starting' | 'busy' | 'idle' | 'exited';
+export type SessionStatus = 'starting' | 'busy' | 'idle' | 'attention' | 'exited';
+
+/**
+ * Screens that are a decision for the human, never for an agent or for Palco: folder trust,
+ * self-updates, permission prompts, yes/no questions, numbered menus. Typing a prompt plus Enter
+ * into one of these picks the highlighted option (often "exit" or "update now").
+ */
+const ATTENTION: [RegExp, string][] = [
+  [/do you trust|trust (this|the) (folder|files|directory|contents)/i, 'pergunta se confia na pasta'],
+  [/^\s*[›❯>]\s*1[.)]\s+\S/m, 'mostra um menu de opções'],
+  [/press enter to continue|enter to confirm/i, 'espera uma confirmação'],
+  [/\((y\/n|yes\/no)\)\s*:?\s*$|\[(y\/n|Y\/n|y\/N)\]\s*:?\s*$/m, 'faz uma pergunta de sim ou não'],
+];
+
+/** Why this screen needs the human, if it does. Only the bottom of the screen is considered. */
+export function attentionReason(screen: string): string | undefined {
+  const tail = screen.split('\n').slice(-16).join('\n');
+  return ATTENTION.find(([re]) => re.test(tail))?.[1];
+}
+
+const RULE = /^\s*[─━═-]{20,}\s*$/;
+
+/** Removes a TUI's input box and status bar from the bottom of a transcript. */
+function dropInputBox(lines: string[]): string[] {
+  // everything from the second-to-last horizontal rule near the bottom (Claude Code)
+  const rules = lines.map((l, i) => (RULE.test(l) ? i : -1)).filter((i) => i >= 0 && i >= lines.length - 14);
+  if (rules.length >= 2) lines = lines.slice(0, rules[rules.length - 2]);
+  else if (rules.length === 1) lines = lines.slice(0, rules[0]);
+  // TUIs without rules (Codex): the trailing input line ("› …") and the status under it
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) {
+    if (/^\s*[›❯]\s/.test(lines[i])) { lines = lines.slice(0, i); break; }
+  }
+  return lines;
+}
+
+/** Transcript without the input box: what the agent actually did, for summaries. */
+export function withoutInputBox(transcript: string) {
+  return dropInputBox(transcript.split('\n')).join('\n').trim();
+}
+
+/**
+ * Pulls the agent's answer out of a terminal transcript: what came after the prompt we typed,
+ * without the TUI's input box and status bar at the bottom.
+ */
+export function extractReply(transcript: string, prompt: string): string {
+  let lines = transcript.split('\n');
+  const key = prompt.split('\n').map((l) => l.trim()).find((l) => l.length > 3)?.slice(0, 40);
+  if (key) {
+    let at = -1;
+    for (let i = lines.length - 1; i >= 0; i--) if (lines[i].includes(key)) { at = i; break; }
+    if (at >= 0) {
+      // skip the rest of the echoed prompt (it may wrap over several lines)
+      const promptLines = prompt.split('\n').length;
+      let j = at + 1;
+      while (j < lines.length && j < at + promptLines + 6 && /^\s{2,}\S/.test(lines[j]) && !/^\s*[⏺●•]/.test(lines[j])) j++;
+      lines = lines.slice(j);
+    }
+  }
+  lines = dropInputBox(lines);
+  // Claude (⏺) and Codex (•) mark each message; keep the agent's last real message, not tool calls
+  const TOOL = /^\s*[⏺•●]\s+(Ran\b|Explored\b|Working\b|Edited\b|Searched\b|Called\b|(Bash|Read|Edit|MultiEdit|Write|Update|Skill|Task|Agent|Grep|Glob|LS|WebFetch|WebSearch|TodoWrite|NotebookEdit|mcp__[\w-]+)\()/;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*[⏺•●]\s+\S/.test(lines[i]) && !TOOL.test(lines[i])) { lines = lines.slice(i); break; }
+  }
+  while (lines.length && (/^\s*✻\s/.test(lines[lines.length - 1]) || !lines[lines.length - 1].trim())) lines.pop();
+  const out = lines.join('\n').replace(/^\s*[•⏺●]\s?/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  return out || transcript.split('\n').slice(-30).join('\n').trim();
+}
+
+export const PALCO_PREAMBLE = `Você está num terminal do Palco, um canvas local onde agentes, notas e navegadores são ligados por cordas.
+- O comando \`palco\` está no PATH. Rode \`palco list\` para ver seu nome e com quem está ligado (agentes, notas, portais).
+- Mensagens que começam com "[Palco] Mensagem de ..." vêm de outro agente. Faça o que pedem e, se for uma tarefa, devolva o resultado com \`palco ask "<nome dele>" "<resultado>"\`.
+- Mensagens com o cabeçalho "Palco Chat" vêm do usuário pela janela de chat: responda só com \`palco say\`.
+- Para falar com outro agente: \`palco ask "Nome" "pedido"\` (espera a resposta; ajuste o timeout da sua ferramenta de shell para até 10 min).
+- Notas ligadas a você: \`palco note read/edit/write "Nome"\`. A skill "palco" tem todos os comandos.`;
 
 /** node-pty ships its macOS spawn-helper without the exec bit when install scripts are skipped. */
 export function ensureSpawnHelper() {
@@ -44,9 +120,14 @@ export class Session extends EventEmitter {
   pty?: IPty;
   term = new HeadlessTerminal({ cols: 120, rows: 36, scrollback: 5000, allowProposedApi: true });
   replay = '';
+  /** Last time the *visible content* changed. TUIs that repaint an identical frame do not count. */
   lastOutputAt = 0;
-  /** Increments on every output chunk; immune to millisecond clock ties. */
+  /** Increments on every content change; immune to millisecond clock ties. */
   outputSeq = 0;
+  lastByteAt = 0;
+  attention?: string;
+  private lastSig = '';
+  private diffTimer?: NodeJS.Timeout;
   startedAt = Date.now();
   exited = false;
   exitCode?: number;
@@ -54,6 +135,8 @@ export class Session extends EventEmitter {
   cols = 120;
   rows = 36;
   pendingInitialPrompt?: string;
+  /** Identifies this terminal to the server; agents never see the master token. */
+  token = crypto.randomBytes(24).toString('hex');
 
   constructor(public wsId: string, public nodeId: string) {
     super();
@@ -61,6 +144,23 @@ export class Session extends EventEmitter {
 
   write(data: string) {
     if (this.pty && !this.exited) this.pty.write(data);
+  }
+
+  /** Called after output is parsed; marks activity only when the screen really changed. */
+  noteOutput() {
+    this.lastByteAt = Date.now();
+    if (this.diffTimer) return;
+    this.diffTimer = setTimeout(() => {
+      this.diffTimer = undefined;
+      // Visible text only: some TUIs scroll and repaint an identical frame every second, which grows
+      // the scrollback without anything new to read. That must not count as work.
+      const sig = this.screen();
+      if (sig !== this.lastSig) {
+        this.lastSig = sig;
+        this.lastOutputAt = Date.now();
+        this.outputSeq++;
+      }
+    }, 60);
   }
 
   resize(cols: number, rows: number) {
@@ -114,8 +214,13 @@ export class SessionManager extends EventEmitter {
       let next: SessionStatus;
       if (s.exited) next = 'exited';
       else if (s.lastOutputAt === 0 && t - s.startedAt < 4000) next = 'starting';
-      else next = t - s.lastOutputAt < this.idleMs ? 'busy' : 'idle';
+      else if (t - s.lastOutputAt < this.idleMs) next = 'busy';
+      else {
+        s.attention = attentionReason(s.screen());
+        next = s.attention ? 'attention' : 'idle';
+      }
       if (next !== s.status) {
+        if (next === 'attention') this.emit('attention', s.wsId, s.nodeId, s.attention);
         s.status = next;
         this.emit('status', s.wsId, s.nodeId, next);
         s.emit('status', next);
@@ -132,12 +237,25 @@ export class SessionManager extends EventEmitter {
     return this.sessions.get(nodeId);
   }
 
+  /** The terminal a per-session token belongs to (constant-time compare). */
+  byToken(token: string | undefined): Session | undefined {
+    if (!token) return undefined;
+    const a = Buffer.from(token);
+    for (const s of this.sessions.values()) {
+      const b = Buffer.from(s.token);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return s;
+    }
+    return undefined;
+  }
+
   buildCommand(ws: Workspace, data: TerminalData): { file: string; args: string[] } {
     const shell = process.env.SHELL || '/bin/zsh';
     let cmd = data.command.trim();
     const role = data.roleId ? this.findRole(ws, data.roleId) : undefined;
-    if (cmd && role && data.agentType === 'claude_code') {
-      cmd += ` --append-system-prompt ${shellQuote(rolePreamble(role.name, role.prompt))}`;
+    if (cmd && data.agentType === 'claude_code' && !/--append-system-prompt/.test(cmd)) {
+      // Every Claude starts knowing it lives in Palco and how to talk to its peers.
+      const parts = [PALCO_PREAMBLE, role ? rolePreamble(role.name, role.prompt) : ''].filter(Boolean).join('\n\n');
+      cmd += ` --append-system-prompt ${shellQuote(parts)}`;
     }
     if (!cmd) return { file: shell, args: ['-l', '-i'] };
     // Run the agent inside a login shell, then drop back to an interactive shell when it exits.
@@ -169,9 +287,10 @@ export class SessionManager extends EventEmitter {
       TERM_PROGRAM: 'Palco',
       LANG: process.env.LANG || 'en_US.UTF-8',
       PALCO_URL: this.serverUrl(),
-      PALCO_TOKEN: this.store.config.token,
+      PALCO_TOKEN: s.token,
       PALCO_TERMINAL_ID: node.id,
       PALCO_CLI: path.join(CLI_BIN_DIR, 'palco'),
+      PALCO_MAILBOX: mailboxDir(),
       PATH: `${CLI_BIN_DIR}:${process.env.PATH || '/usr/bin:/bin'}`,
     };
     delete env.CLAUDECODE;
@@ -189,19 +308,20 @@ export class SessionManager extends EventEmitter {
     }
 
     const role = data.roleId ? this.findRole(ws, data.roleId) : undefined;
-    if (role && data.agentType !== 'claude_code' && data.command.trim()) {
+    if (role && data.command.trim() && (data.agentType !== 'claude_code' || /--append-system-prompt/.test(data.command))) {
       s.pendingInitialPrompt = rolePreamble(role.name, role.prompt);
     }
 
     s.pty.onData((d) => {
-      s.lastOutputAt = Date.now();
-      s.outputSeq++;
-      s.term.write(d);
+      s.term.write(d, () => s.noteOutput());
       s.replay += d;
       if (s.replay.length > REPLAY_LIMIT) s.replay = s.replay.slice(-REPLAY_LIMIT * 0.8);
       this.emit('data', ws.id, node.id, d);
       s.emit('data', d);
     });
+    // The headless terminal answers device queries (cursor position, device attributes) so TUIs
+    // like Codex work even when no browser is watching. The browser's own answers are dropped.
+    s.term.onData((reply) => s.write(reply));
     s.pty.onExit(({ exitCode }) => {
       s.exited = true;
       s.exitCode = exitCode;

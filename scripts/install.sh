@@ -21,6 +21,7 @@ npm ci --no-audit --no-fund --loglevel=error
 
 say "Compilando"
 npm run build --silent
+"$SRC/scripts/build-helper.sh" || say "Palco Helper não compilou: computer use e Ombro ficam desligados"
 
 # The service runs from ~/.palco/app, outside ~/Documents and ~/Desktop, so macOS privacy
 # prompts for those folders never block it from starting at login.
