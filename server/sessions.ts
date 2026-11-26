@@ -185,7 +185,9 @@ export class Session extends EventEmitter {
   /** Last n lines of the scrollback + screen. */
   tail(n = 200): string {
     const buf = this.term.buffer.active;
-    const end = buf.viewportY + this.term.rows;
+    let end = buf.viewportY + this.term.rows;
+    // count from the last line with text, not from the blank bottom of the screen
+    while (end > 0 && !(buf.getLine(end - 1)?.translateToString(true) ?? '').trim()) end--;
     const lines: string[] = [];
     for (let i = Math.max(0, end - n); i < end; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();

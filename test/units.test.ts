@@ -131,3 +131,13 @@ ${'─'.repeat(40)}
     expect(r).toBe('palco-42\nuser ~ %');
   });
 });
+
+import { Session } from '../server/sessions.js';
+
+describe('screen tail', () => {
+  it('counts the last lines from the last line with text', async () => {
+    const s = new Session('w', 'n');
+    await new Promise<void>((r) => s.term.write('um\r\ndois\r\ntres\r\n', r));
+    expect(s.tail(2)).toBe('dois\ntres');
+  });
+});
