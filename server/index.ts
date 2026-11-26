@@ -308,7 +308,7 @@ export async function startServer(opts: { port?: number } = {}): Promise<Server>
     if (!originAllowed(req)) return send(403, { error: 'origem não permitida' });
 
     if (u.pathname.startsWith('/api/')) {
-      if (u.pathname === '/api/health') return send(200, { ok: true, version: VERSION, pid: process.pid, home: PALCO_HOME });
+      if (u.pathname === '/api/health') return send(200, { ok: true, version: VERSION, pid: process.pid });
       // <img> tags cannot send headers, so /api/file also accepts ?token=
       const auth = req.headers.authorization?.replace(/^Bearer\s+/i, '')
         ?? (u.pathname === '/api/file' ? u.searchParams.get('token') ?? undefined : undefined);

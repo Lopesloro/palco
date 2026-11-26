@@ -201,6 +201,10 @@ export class Core extends EventEmitter {
     const [dw, dh] = SIZE[type];
     const w = opts.w ?? dw, h = opts.h ?? dh;
     const floorId = opts.floorId ?? opts.near?.floorId ?? this.groundOf(ws).id;
+    // no anchor given: place it next to the newest card on the floor, not on top of the origin
+    if (!opts.near && (opts.x === undefined || opts.y === undefined) && type !== 'drawing') {
+      opts.near = [...ws.nodes].reverse().find((n) => n.floorId === floorId && n.type !== 'drawing');
+    }
     const pos = opts.x !== undefined && opts.y !== undefined ? { x: opts.x, y: opts.y } : this.freeSpot(ws, floorId, opts.near, w, h, opts.side);
     if (type !== 'drawing') (data as { name: string }).name = this.store.uniqueNodeName(ws, (data as { name: string }).name);
     const node: PalcoNode<T> = { id: uid(), type, floorId, x: pos.x, y: pos.y, w, h, data, createdAt: now() };
