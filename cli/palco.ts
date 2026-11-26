@@ -44,6 +44,26 @@ const launchctl = (...args: string[]) => {
   try { return execFileSync('launchctl', args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString(); } catch (e) { return (e as { stderr?: Buffer }).stderr?.toString() ?? ''; }
 };
 const installed = () => process.platform === 'darwin' && fs.existsSync(PLIST);
+const jobLoaded = () => {
+  try { execFileSync('launchctl', ['print', `gui/${uidNum()}/${LABEL}`], { stdio: 'ignore' }); return true; } catch { return false; }
+};
+
+/** bootout returns before launchd finishes unloading; bootstrap during that window fails with EIO. */
+async function unloadJob() {
+  launchctl('bootout', `gui/${uidNum()}/${LABEL}`);
+  for (let i = 0; i < 40 && jobLoaded(); i++) await sleep(250);
+}
+
+async function loadJob() {
+  let out = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (jobLoaded()) return '';
+    out = launchctl('bootstrap', `gui/${uidNum()}`, PLIST);
+    if (jobLoaded()) return '';
+    await sleep(600);
+  }
+  return out.trim();
+}
 
 function plistXml() {
   const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -112,10 +132,10 @@ async function install() {
     try { process.kill(h.pid, 'SIGTERM'); } catch { /* not ours */ }
     await sleep(1000);
   }
-  launchctl('bootout', `gui/${uidNum()}/${LABEL}`);
+  await unloadJob();
   fs.writeFileSync(PLIST, plistXml());
-  const out = launchctl('bootstrap', `gui/${uidNum()}`, PLIST);
-  if (out.trim() && !/already/i.test(out)) console.error(out.trim());
+  const out = await loadJob();
+  if (out) console.error(out);
   const ok = await waitHealthy(20000);
   console.log(`Serviço launchd instalado (${LABEL}): sobe no login e reinicia se cair.`);
   console.log(`Comando: ${linkBin()}`);
@@ -126,7 +146,7 @@ async function install() {
 }
 
 async function uninstall() {
-  launchctl('bootout', `gui/${uidNum()}/${LABEL}`);
+  await unloadJob();
   fs.rmSync(PLIST, { force: true });
   console.log('Serviço removido. Seus dados continuam em', HOME);
 }
@@ -136,7 +156,7 @@ async function ensureRunning() {
   if (h) return h;
   if (installed()) {
     // `palco stop` boots the job out of launchd, so load it again before kicking it
-    launchctl('bootstrap', `gui/${uidNum()}`, PLIST);
+    await loadJob();
     launchctl('kickstart', `gui/${uidNum()}/${LABEL}`);
   } else {
     if (!fs.existsSync(SERVER_JS)) throw new Error(`Build ausente em ${SERVER_JS}. Rode npm run build.`);
@@ -156,7 +176,7 @@ function openBrowser(u: string) {
 
 async function stop() {
   if (installed()) {
-    launchctl('bootout', `gui/${uidNum()}/${LABEL}`);
+    await unloadJob();
     console.log('Serviço parado (volta no próximo login ou com `palco start`).');
     return;
   }
@@ -167,10 +187,7 @@ async function stop() {
 }
 
 async function start() {
-  if (installed() && !(await health())) {
-    launchctl('bootstrap', `gui/${uidNum()}`, PLIST);
-    launchctl('kickstart', `gui/${uidNum()}/${LABEL}`);
-  }
+  if (installed() && !(await health())) await loadJob();
   const h = await ensureRunning();
   console.log(`Palco ${h.version} no ar em ${base()}`);
 }
