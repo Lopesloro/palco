@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.palco/
+*.log
+.DS_Store
